@@ -1,0 +1,38 @@
+name: isolated_browser
+description: Isolated private browser with encrypted transport
+version: 1.0.0+1
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # HTTP / state
+  provider: ^6.1.2
+  http: ^1.2.1
+
+  # FFI для Rust транспортного модуля
+  ffi: ^2.1.3
+
+  # Иконки
+  flutter_svg: ^2.0.10+1
+
+  # Хранение настроек (gateway host, key)
+  shared_preferences: ^2.3.2
+
+  # Логи
+  logging: ^1.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/

@@ -1,0 +1,54 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "com.isolatedbrowser.app"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.isolatedbrowser.app"
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+
+        ndk {
+            // Архитектуры для Rust cross-compile
+            abiFilters "arm64-v8a", "x86_64"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    sourceSets {
+        main {
+            // Rust .so файлы кладём в jniLibs после cross-compile
+            jniLibs.srcDirs = ["src/main/jniLibs"]
+        }
+    }
+}
+
+flutter {
+    source "../.."
+}
+
+dependencies {
+    // Flutter embedding
+    implementation "io.flutter:flutter_embedding_release:+"
+
+    // Mozilla Android Components — GeckoView
+    def acVersion = "121.0"
+    implementation "org.mozilla.components:browser-engine-gecko:$acVersion"
+    implementation "org.mozilla.components:concept-engine:$acVersion"
+
+    // GeckoView напрямую (нужен для GeckoRuntimeSettings)
+    implementation "org.mozilla.geckoview:geckoview:121.0.20240103215720"
+}
