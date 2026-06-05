@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../widgets/service_grid.dart';
+import '../models/web_service.dart';
 
 /// Экран браузера — оболочка вокруг нативного GeckoView/WebView.
 ///
@@ -113,7 +115,7 @@ class _GeckoViewContainer extends StatelessWidget {
         'socks_proxy_host': '127.0.0.1',
         'socks_proxy_port': socksProxyPort,
       },
-      creationParamsCodec: const StandardMessageCodec(),
+      creationParamsCodec: StandardMessageCodec(),
     );
   }
 }
