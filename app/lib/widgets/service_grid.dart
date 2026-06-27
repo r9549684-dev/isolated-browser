@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/catalog_service.dart';
 import '../models/web_service.dart';
+import '../screens/select_services_screen.dart';
 
 class ServiceGrid extends StatelessWidget {
   final void Function(WebService service) onServiceTap;
@@ -13,11 +14,23 @@ class ServiceGrid extends StatelessWidget {
     final services = context.watch<CatalogService>().activeServices;
 
     if (services.isEmpty) {
-      return const Center(
-        child: Text(
-          'No services selected.\nTap "Manage" to choose your plan.',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.grey),
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.apps_outlined, size: 48, color: Colors.grey),
+            const SizedBox(height: 16),
+            const Text(
+              'No services selected',
+              style: TextStyle(color: Colors.grey, fontSize: 16),
+            ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: () => _openSelectServices(context),
+              icon: const Icon(Icons.add),
+              label: const Text('Choose services'),
+            ),
+          ],
         ),
       );
     }
@@ -38,6 +51,13 @@ class ServiceGrid extends StatelessWidget {
           onTap: () => onServiceTap(service),
         );
       },
+    );
+  }
+
+  void _openSelectServices(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const SelectServicesScreen()),
     );
   }
 }

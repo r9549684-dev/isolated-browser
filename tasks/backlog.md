@@ -26,7 +26,7 @@
 - [ ] Настройка GeckoView через `setProxy()` на локальный прокси
 - [ ] Подключение транспортного модуля (Rust FFI)
 - [ ] Тест: Telegram Web, WhatsApp Web через GeckoView
-- [ ] Тест: значок VPN не появляется
+- [ ] Тест: значок service не появляется
 
 ## Фаза 3 — iOS MVP
 
@@ -34,7 +34,7 @@
 - [ ] Локальный HTTP-сервер внутри приложения (Swift)
 - [ ] Подключение транспортного модуля
 - [ ] Ограниченный список поддерживаемых сервисов (без полного WebRTC)
-- [ ] Тест App Store compliance (нет VPN API)
+- [ ] Тест App Store compliance (нет service API)
 
 ## Фаза 4 — Windows MVP
 

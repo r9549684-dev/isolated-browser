@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/transport_service.dart';
+import '../screens/settings_screen.dart';
 
 class TransportStatusBar extends StatelessWidget {
   const TransportStatusBar({super.key});
@@ -43,6 +44,24 @@ class TransportStatusBar extends StatelessWidget {
             TextButton(
               onPressed: () => context.read<TransportService>().start(),
               child: const Text('Retry', style: TextStyle(fontSize: 11)),
+            ),
+          ],
+          if (transport.state == TransportState.idle &&
+              transport.errorMessage.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                transport.errorMessage,
+                style: TextStyle(color: color, fontSize: 11),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              ),
+              child: const Text('Settings', style: TextStyle(fontSize: 11)),
             ),
           ],
           if (transport.state == TransportState.running)

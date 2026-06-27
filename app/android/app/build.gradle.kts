@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.isolatedbrowser.app"
-    compileSdk = 35
+    compileSdk = 36
     ndkVersion = "28.2.13676358"
 
     compileOptions {
@@ -21,7 +21,7 @@ android {
 
     defaultConfig {
         applicationId = "com.isolatedbrowser.app"
-        minSdk = 21
+        minSdk = flutter.minSdkVersion
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
@@ -52,5 +52,4 @@ dependencies {
     val acVersion = "121.0"
     implementation("org.mozilla.components:browser-engine-gecko:$acVersion")
     implementation("org.mozilla.components:concept-engine:$acVersion")
-    implementation("org.mozilla.geckoview:geckoview-nightly:121.0.20240103215720")
 }

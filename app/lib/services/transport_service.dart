@@ -29,6 +29,10 @@ typedef _TransportStartDart = int Function(
 typedef _TransportVersionNative = Pointer<Utf8> Function();
 typedef _TransportVersionDart   = Pointer<Utf8> Function();
 
+// int32_t transport_stop()
+typedef _TransportStopNative = Int32 Function();
+typedef _TransportStopDart   = int Function();
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 enum TransportState { idle, starting, running, error }
@@ -77,7 +81,7 @@ class TransportService extends ChangeNotifier {
   Future<void> start() async {
     if (_state == TransportState.running) return;
     if (!_settings.isConfigured) {
-      _state = TransportState.error;
+      _state = TransportState.idle;
       _errorMessage = 'Gateway not configured. Open Settings.';
       notifyListeners();
       return;
@@ -122,6 +126,33 @@ class TransportService extends ChangeNotifier {
       _errorMessage = e.toString();
     }
 
+    notifyListeners();
+  }
+
+  /// Останавливает транспортный модуль.
+  Future<void> stop() async {
+    if (_state != TransportState.running) return;
+
+    _state = TransportState.idle;
+    notifyListeners();
+
+    try {
+      final lib = _loadLib();
+      final fn = lib.lookupFunction<_TransportStopNative, _TransportStopDart>(
+        'transport_stop',
+      );
+      final result = fn();
+      if (result == 0) {
+        _state = TransportState.idle;
+        _errorMessage = '';
+      } else {
+        _state = TransportState.error;
+        _errorMessage = 'transport_stop returned $result';
+      }
+    } catch (e) {
+      _state = TransportState.error;
+      _errorMessage = e.toString();
+    }
     notifyListeners();
   }
 

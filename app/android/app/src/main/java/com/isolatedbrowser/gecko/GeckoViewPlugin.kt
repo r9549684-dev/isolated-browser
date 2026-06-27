@@ -62,7 +62,7 @@ class GeckoViewWrapper(
     private val engineSession: EngineSession by lazy {
         engine.createSession().also { session ->
             session.register(object : EngineSession.Observer {
-                override fun onLocationChange(url: String, hasUserGesture: Boolean) {
+                override fun onLocationChange(url: String) {
                     channel.invokeMethod("onPageStarted", url)
                 }
                 override fun onLoadingStateChange(loading: Boolean) {
@@ -100,30 +100,16 @@ class GeckoViewWrapper(
         engineSession.close()
     }
 
-    companion object {
-        /**
-         * Создаёт GeckoRuntime с SOCKS5-прокси через native GeckoRuntimeSettings.
-         * proxyConfig задаётся через preferences напрямую в GeckoRuntime.
-         */
-        private fun geckoRuntime(
-            proxyHost: String,
-            proxyPort: Int,
-        ): org.mozilla.geckoview.GeckoRuntime {
-            val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
-                .proxyOverride(
-                    org.mozilla.geckoview.GeckoRuntimeSettings.ProxyConfig(
-                        "socks",
-                        proxyHost,
-                        proxyPort,
-                    )
-                )
-                .build()
+    private fun geckoRuntime(
+        proxyHost: String,
+        proxyPort: Int,
+    ): org.mozilla.geckoview.GeckoRuntime {
+        val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
+            .build()
 
-            return org.mozilla.geckoview.GeckoRuntime.create(
-                // Context передаётся через getApplicationContext() из Application
-                android.app.Application().applicationContext,
-                runtimeSettings,
-            )
-        }
+        return org.mozilla.geckoview.GeckoRuntime.create(
+            context.applicationContext,
+            runtimeSettings,
+        )
     }
 }

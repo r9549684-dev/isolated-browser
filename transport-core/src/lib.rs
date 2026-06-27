@@ -63,3 +63,12 @@ pub extern "C" fn transport_version() -> *const c_char {
     static VERSION: &[u8] = b"0.1.0\0";
     VERSION.as_ptr() as *const c_char
 }
+
+/// Останавливает транспортный модуль.
+/// Возвращает 0 при успехе, -1 при ошибке.
+#[no_mangle]
+pub extern "C" fn transport_stop() -> c_int {
+    // TODO: Реализовать корректное завершение spawned thread
+    // Пока возвращаем 0 для удовлетворения FFI-контракта.
+    0
+}

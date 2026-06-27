@@ -1,0 +1,116 @@
+name: Build Transport Core (Rust cdylib)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'transport-core/**'
+      - '.github/workflows/build-transport.yml'
+  pull_request:
+    paths:
+      - 'transport-core/**'
+      - '.github/workflows/build-transport.yml'
+
+jobs:
+  build-windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: transport-core
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build cdylib
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport_core-windows-x86_64
+          path: transport-core/target/x86_64-pc-windows-msvc/release/transport_core.dll
+
+  build-android:
+    name: Build Android (aarch64 & x86_64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: transport-core
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: Build Android aarch64
+        run: cargo ndk -t arm64-v8a -o ../app/android/app/src/main/jniLibs build --release
+
+      - name: Build Android x86_64
+        run: cargo ndk -t x86_64 -o ../app/android/app/src/main/jniLibs build --release
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport_core-android
+          path: app/android/app/src/main/jniLibs/
+          
+  build-flutter-apk:
+    name: Build Flutter APK (Android)
+    runs-on: ubuntu-latest
+    needs: build-android
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: transport_core-android
+          path: app/android/app/src/main/jniLibs/
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.3'
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-browser-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
