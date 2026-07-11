@@ -40,7 +40,6 @@ use transport_core::error::TransportError;
 mod auth;
 mod promo;
 use auth::{AuthManager, Claims};
-use promo::PromoManager;
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 5000;
 const IDLE_TIMEOUT_SECS: u64 = 300; // 5 минут
@@ -261,13 +260,11 @@ async fn handle_tcp_connection(
                         // Валидируем подписку через JWT
                         match subscription_manager.validate_subscription_token(&jwt_token).await {
                             Some(claims) => {
-                                let subscription_id = claims.sub.clone();
                                 handle_authenticated_client(tls_stream, key, subscription_manager, claims).await?;
                             }
                             None => {
-                                debug!("invalid subscription token — fallback to CDN: {}", fallback_cdn);
-                                fallback_tcp_proxy(tcp, &fallback_cdn, client_hello_data).await
-                                    .map_err(TransportError::Io)?;
+                                debug!("invalid subscription token — closing connection");
+                                return Err(TransportError::Protocol("invalid subscription token".into()));
                             }
                         }
                     }
@@ -277,15 +274,13 @@ async fn handle_tcp_connection(
                     }
                 }
             } else {
-                debug!("auth FAIL — fallback to CDN: {}", fallback_cdn);
-                fallback_tcp_proxy(tcp, &fallback_cdn, client_hello_data).await
-                    .map_err(TransportError::Io)?;
+                debug!("auth FAIL — closing connection");
+                return Err(TransportError::Protocol("auth failed".into()));
             }
         }
         None => {
-            debug!("no auth token in ClientHello — fallback to CDN: {}", fallback_cdn);
-            fallback_tcp_proxy(tcp, &fallback_cdn, client_hello_data).await
-                .map_err(TransportError::Io)?;
+            debug!("no auth token in ClientHello — closing connection");
+            return Err(TransportError::Protocol("no auth token".into()));
         }
     }
     
