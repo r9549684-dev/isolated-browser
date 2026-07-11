@@ -154,6 +154,7 @@ async fn connect_and_request(
 }
 
 // Skip certificate verification for testing
+#[derive(Debug)]
 struct SkipServerVerification;
 
 impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
