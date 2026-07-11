@@ -152,11 +152,13 @@ class CatalogService extends ChangeNotifier {
   Future<WebService> ownerAddService({
     required String name,
     required String url,
+    String description = '',
   }) async {
     final id = 'custom_${DateTime.now().millisecondsSinceEpoch}';
     final service = WebService(
       id:       id,
       name:     name,
+      description: description,
       url:      _normalizeUrl(url),
       icon:     _guessIcon(url),
       color:    _guessColor(url),
@@ -176,11 +178,12 @@ class CatalogService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> ownerEditService(String id, {String? name, String? url}) async {
+  Future<void> ownerEditService(String id, {String? name, String? description, String? url}) async {
     _catalog = _catalog.map((s) {
       if (s.id != id || !s.isCustom) return s;
       return s.copyWith(
         name: name,
+        description: description,
         url:  url != null ? _normalizeUrl(url) : null,
       );
     }).toList();

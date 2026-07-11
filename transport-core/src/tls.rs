@@ -8,11 +8,16 @@ use crate::error::TransportError;
 
 pub struct TlsClient {
     connector: TlsConnector,
+    sni_pool: Vec<String>,
+    current_sni_idx: usize,
 }
 
 impl TlsClient {
-    /// Создаёт TLS-клиент с системными корневыми сертификатами.
-    pub fn new() -> Result<Self, TransportError> {
+    pub fn new(sni_pool: Vec<String>) -> Result<Self, TransportError> {
+        if sni_pool.is_empty() {
+            return Err(TransportError::Protocol("SNI pool is empty".into()));
+        }
+
         let mut root_store = RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
@@ -22,23 +27,33 @@ impl TlsClient {
 
         Ok(Self {
             connector: TlsConnector::from(Arc::new(config)),
+            sni_pool,
+            current_sni_idx: 0,
         })
     }
 
-    /// Устанавливает TLS-соединение с удалённым сервером.
-    /// Возвращает готовый TLS-стрим поверх TCP.
+    pub fn rotate_sni(&mut self) {
+        self.current_sni_idx = (self.current_sni_idx + 1) % self.sni_pool.len();
+    }
+
+    pub fn current_sni(&self) -> &str {
+        &self.sni_pool[self.current_sni_idx]
+    }
+
     pub async fn connect(
-        &self,
+        &mut self,
         host: &str,
         port: u16,
     ) -> Result<TlsStream<TcpStream>, TransportError> {
         let addr = format!("{}:{}", host, port);
         let tcp = TcpStream::connect(&addr).await?;
 
-        let server_name = ServerName::try_from(host.to_string())
-            .map_err(|_| TransportError::InvalidHost(host.to_string()))?;
+        let sni = self.current_sni().to_string();
+        let server_name = ServerName::try_from(sni.clone())
+            .map_err(|_| TransportError::InvalidHost(sni))?;
 
         let tls_stream = self.connector.connect(server_name, tcp).await?;
+        self.rotate_sni();
         Ok(tls_stream)
     }
 }

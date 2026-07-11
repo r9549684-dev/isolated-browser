@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/catalog_service.dart';
+import '../services/promo_service.dart';
+import '../services/subscription_service.dart';
 import '../models/web_service.dart';
 
 /// Экран выбора сервисов.
@@ -18,6 +20,13 @@ class SelectServicesScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Your Services'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.card_giftcard),
+            tooltip: 'Enter promo code',
+            onPressed: () => _showPromoDialog(context),
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(36),
           child: _BaseSlotsBar(
@@ -142,6 +151,75 @@ class SelectServicesScreen extends StatelessWidget {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Subscribe to a plan to select services.')),
     );
+  }
+
+  void _showPromoDialog(BuildContext context) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Promo Code'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(
+            hintText: 'Enter code',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (value) async {
+            Navigator.pop(context);
+            await _activatePromo(context, value);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await _activatePromo(context, controller.text);
+            },
+            child: const Text('Activate'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _activatePromo(BuildContext context, String code) async {
+    if (code.trim().isEmpty) return;
+
+    final subscriptionService = context.read<SubscriptionService>();
+    final result = await PromoService.activate(code, subscriptionService);
+
+    if (!context.mounted) return;
+
+    switch (result) {
+      case PromoResult.success:
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Code "$code" activated!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      case PromoResult.invalid:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invalid promo code'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      case PromoResult.alreadyUsed:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This code has already been used'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+    }
   }
 }
 

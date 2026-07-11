@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'services/transport_service.dart';
 import 'services/settings_service.dart';
 import 'services/catalog_service.dart';
+import 'services/subscription_service.dart';
 import 'screens/home_screen.dart';
 
 void main() async {
@@ -15,12 +16,16 @@ void main() async {
   final catalog = CatalogService();
   await catalog.load();
 
+  final subscriptionService = SubscriptionService();
+  await subscriptionService.init();
+
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => TransportService(settings)),
+        ChangeNotifierProvider(create: (_) => TransportService(settings, subscriptionService)),
         Provider.value(value: settings),
         ChangeNotifierProvider.value(value: catalog),
+        Provider.value(value: subscriptionService),
       ],
       child: const IsolatedBrowserApp(),
     ),

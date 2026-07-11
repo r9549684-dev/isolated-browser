@@ -10,12 +10,14 @@
 ///                        tls.rs → удалённый gateway
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
 use crate::error::TransportError;
 use crate::protocol::FrameCodec;
+use crate::rate_limiter::RateLimiter;
 use crate::tls::TlsClient;
 
 const SOCKS_VERSION: u8 = 0x05;
@@ -32,6 +34,9 @@ pub struct Socks5Proxy {
     gateway_host: String,
     gateway_port: u16,
     key: [u8; 32],
+    sni_pool: Vec<String>,
+    server_public: [u8; 32],
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl Socks5Proxy {
@@ -40,13 +45,23 @@ impl Socks5Proxy {
         gateway_host: impl Into<String>,
         gateway_port: u16,
         key: [u8; 32],
+        sni_pool: Vec<String>,
+        server_public: [u8; 32],
     ) -> Self {
         Self {
             bind_addr,
             gateway_host: gateway_host.into(),
             gateway_port,
             key,
+            sni_pool,
+            server_public,
+            rate_limiter: None,
         }
+    }
+
+    pub fn with_rate_limit(mut self, bytes_per_second: u64) -> Self {
+        self.rate_limiter = Some(Arc::new(RateLimiter::new(bytes_per_second)));
+        self
     }
 
     /// Запускает прокси-сервер. Блокирует до ошибки listener.
@@ -57,15 +72,20 @@ impl Socks5Proxy {
         let gateway_host = std::sync::Arc::new(self.gateway_host);
         let key = self.key;
         let gateway_port = self.gateway_port;
+        let sni_pool = self.sni_pool;
+        let server_public = self.server_public;
+        let rate_limiter = self.rate_limiter;
 
         loop {
             let (client, peer) = listener.accept().await?;
             debug!("new connection from {}", peer);
 
             let gw_host = gateway_host.clone();
+            let sni = sni_pool.clone();
+            let rl = rate_limiter.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_connection(client, &gw_host, gateway_port, key).await
+                    handle_connection(client, &gw_host, gateway_port, key, sni, server_public, rl).await
                 {
                     warn!("connection {} error: {}", peer, e);
                 }
@@ -79,6 +99,9 @@ async fn handle_connection(
     gateway_host: &str,
     gateway_port: u16,
     key: [u8; 32],
+    sni_pool: Vec<String>,
+    server_public: [u8; 32],
+    rate_limiter: Option<Arc<RateLimiter>>,
 ) -> Result<(), TransportError> {
     // ── 1. SOCKS5 handshake ───────────────────────────────────────────────
     let mut header = [0u8; 2];
@@ -143,8 +166,11 @@ async fn handle_connection(
     debug!("CONNECT {}:{}", target_host, target_port);
 
     // ── 3. Подключаемся к gateway поверх TLS ────────────────────────────
-    let tls_client = TlsClient::new()?;
+    let mut tls_client = TlsClient::new(sni_pool)?;
     let mut tls_stream = tls_client.connect(gateway_host, gateway_port).await?;
+
+    // ── 4. Steal-oncall auth frame ──────────────────────────────────────
+    crate::steal::send_auth_frame(&mut tls_stream, &server_public).await?;
 
     let codec = FrameCodec::new(&key);
 
@@ -168,7 +194,7 @@ async fn handle_connection(
         .await?;
 
     // ── 4. Прозрачный двунаправленный туннель ────────────────────────────
-    relay(client, tls_stream, codec).await
+    relay(client, tls_stream, codec, rate_limiter).await
 }
 
 /// Проксирует данные между клиентом и gateway в обоих направлениях.
@@ -178,6 +204,7 @@ async fn relay(
     mut client: TcpStream,
     mut gateway: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
     codec: FrameCodec,
+    rate_limiter: Option<Arc<RateLimiter>>,
 ) -> Result<(), TransportError> {
     let mut client_buf = vec![0u8; 8192];
 
@@ -190,6 +217,12 @@ async fn relay(
                     debug!("client closed connection");
                     return Ok(());
                 }
+                
+                // Rate limiting (client-side) — async wait
+                if let Some(ref rl) = rate_limiter {
+                    rl.wait_for_bytes_async(n as u64).await;
+                }
+                
                 codec.write_frame(&mut gateway, &client_buf[..n]).await?;
             }
 
@@ -197,6 +230,11 @@ async fn relay(
             frame = codec.read_frame(&mut gateway) => {
                 match frame {
                     Ok(data) => {
+                        // Rate limiting (client-side) — async wait
+                        if let Some(ref rl) = rate_limiter {
+                            rl.wait_for_bytes_async(data.len() as u64).await;
+                        }
+                        
                         client.write_all(&data).await?;
                     }
                     Err(TransportError::Io(e))

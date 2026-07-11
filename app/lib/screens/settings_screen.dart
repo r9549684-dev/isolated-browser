@@ -15,6 +15,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _portCtrl;
   late final TextEditingController _secretCtrl;
   late final TextEditingController _socksPortCtrl;
+  late final TextEditingController _sniListCtrl;
+  late final TextEditingController _serverPubCtrl;
 
   @override
   void initState() {
@@ -24,6 +26,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _portCtrl     = TextEditingController(text: s.gatewayPort.toString());
     _secretCtrl   = TextEditingController(text: s.sharedSecret);
     _socksPortCtrl = TextEditingController(text: s.socksPort.toString());
+    _sniListCtrl  = TextEditingController(text: s.sniList);
+    _serverPubCtrl = TextEditingController(text: s.serverPublic);
   }
 
   @override
@@ -32,6 +36,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _portCtrl.dispose();
     _secretCtrl.dispose();
     _socksPortCtrl.dispose();
+    _sniListCtrl.dispose();
+    _serverPubCtrl.dispose();
     super.dispose();
   }
 
@@ -41,6 +47,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     s.gatewayPort  = int.tryParse(_portCtrl.text.trim()) ?? 443;
     s.sharedSecret = _secretCtrl.text.trim();
     s.socksPort    = int.tryParse(_socksPortCtrl.text.trim()) ?? 18080;
+    s.sniList      = _sniListCtrl.text.trim();
+    s.serverPublic = _serverPubCtrl.text.trim();
     await s.save();
 
     if (!mounted) return;
@@ -83,6 +91,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Field(
             controller: _secretCtrl,
             label: 'Shared Secret (64 hex chars)',
+            hint: 'a1b2c3d4…',
+            obscureText: true,
+            maxLength: 64,
+          ),
+          const SizedBox(height: 24),
+          _SectionHeader('Stealth Mode'),
+          _Field(
+            controller: _sniListCtrl,
+            label: 'SNI Pool (comma-separated)',
+            hint: 'cloudflare.com,google.com',
+            keyboardType: TextInputType.url,
+          ),
+          const SizedBox(height: 12),
+          _Field(
+            controller: _serverPubCtrl,
+            label: 'Server X25519 Public Key (64 hex chars)',
             hint: 'a1b2c3d4…',
             obscureText: true,
             maxLength: 64,

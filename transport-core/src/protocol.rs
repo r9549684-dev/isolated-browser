@@ -1,19 +1,18 @@
-/// Кастомный протокол поверх TLS.
+/// Протокол с маскировкой под TLS 1.3 Application Data.
 ///
-/// Формат фрейма (бинарный, поверх уже установленного TLS-стрима):
+/// Каждый фрейм выглядит как TLS record:
 ///
-///  ┌──────────┬────────────┬──────────┬─────────────────────┐
-///  │  magic   │  version   │  length  │       payload       │
-///  │  4 bytes │  1 byte    │  4 bytes │     N bytes         │
-///  └──────────┴────────────┴──────────┴─────────────────────┘
+///  ┌──────────┬────────────┬──────────┬─────────────────────────────────┐
+///  │  0x17    │  0x03 0x03 │  length  │         payload                 │
+///  │  1 byte  │  2 bytes   │  2 bytes │        N bytes                  │
+///  └──────────┴────────────┴──────────┴─────────────────────────────────┘
 ///
-/// magic   = 0x49_42_52_57  ("IBRW" — Isolated Browser)
-/// version = 0x01
-/// length  = длина payload в байтах (big-endian u32)
-/// payload = зашифрованные данные (ChaCha20-Poly1305)
+/// 0x17 = TLS Application Data content type
+/// 0x03 0x03 = TLS 1.2 version (для совместимости с DPI)
+/// length = длина payload (big-endian u16)
+/// payload = nonce (12 bytes) + ciphertext (ChaCha20-Poly1305)
 ///
-/// Перед payload идёт 12-байтовый nonce (случайный, per-frame).
-/// Итого overhead на фрейм: 4 + 1 + 4 + 12 = 21 байт.
+/// Итого overhead на фрейм: 5 байт (TLS record header) + 12 байт (nonce) = 17 байт.
 
 use bytes::{Buf, BufMut, BytesMut};
 use chacha20poly1305::{
@@ -24,11 +23,12 @@ use rand::RngCore;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::error::TransportError;
 
-const MAGIC: u32       = 0x49_42_52_57;
-const VERSION: u8      = 0x01;
-const HEADER_SIZE: usize = 4 + 1 + 4;   // magic + version + length
-const NONCE_SIZE: usize  = 12;
-const MAX_PAYLOAD: usize = 64 * 1024;    // 64 KB максимальный фрейм
+const TLS_CONTENT_TYPE: u8 = 0x17;
+const TLS_VERSION_MAJOR: u8 = 0x03;
+const TLS_VERSION_MINOR: u8 = 0x03;
+const TLS_RECORD_HEADER_SIZE: usize = 5;
+const NONCE_SIZE: usize = 12;
+const MAX_PAYLOAD: usize = 16 * 1024;
 
 pub struct FrameCodec {
     cipher: ChaCha20Poly1305,
@@ -71,12 +71,13 @@ impl FrameCodec {
             .encrypt(nonce, plaintext)
             .map_err(|e| TransportError::Crypto(e.to_string()))?;
 
-        let payload_len = (NONCE_SIZE + ciphertext.len()) as u32;
+        let payload_len = (NONCE_SIZE + ciphertext.len()) as u16;
 
-        let mut buf = BytesMut::with_capacity(HEADER_SIZE + NONCE_SIZE + ciphertext.len());
-        buf.put_u32(MAGIC);
-        buf.put_u8(VERSION);
-        buf.put_u32(payload_len);
+        let mut buf = BytesMut::with_capacity(TLS_RECORD_HEADER_SIZE + NONCE_SIZE + ciphertext.len());
+        buf.put_u8(TLS_CONTENT_TYPE);
+        buf.put_u8(TLS_VERSION_MAJOR);
+        buf.put_u8(TLS_VERSION_MINOR);
+        buf.put_u16(payload_len);
         buf.put_slice(&nonce_bytes);
         buf.put_slice(&ciphertext);
 
@@ -90,27 +91,28 @@ impl FrameCodec {
         &self,
         reader: &mut R,
     ) -> Result<Vec<u8>, TransportError> {
-        let mut header = [0u8; HEADER_SIZE];
+        let mut header = [0u8; TLS_RECORD_HEADER_SIZE];
         reader.read_exact(&mut header).await?;
 
         let mut cursor = &header[..];
-        let magic = cursor.get_u32();
-        if magic != MAGIC {
+        let content_type = cursor.get_u8();
+        if content_type != TLS_CONTENT_TYPE {
             return Err(TransportError::Protocol(format!(
-                "bad magic: 0x{:08X}",
-                magic
+                "bad content type: 0x{:02X} (expected 0x{:02X})",
+                content_type, TLS_CONTENT_TYPE
             )));
         }
 
-        let version = cursor.get_u8();
-        if version != VERSION {
+        let version_major = cursor.get_u8();
+        let version_minor = cursor.get_u8();
+        if version_major != TLS_VERSION_MAJOR || version_minor != TLS_VERSION_MINOR {
             return Err(TransportError::Protocol(format!(
-                "unsupported version: {}",
-                version
+                "bad TLS version: {}.{} (expected {}.{}",
+                version_major, version_minor, TLS_VERSION_MAJOR, TLS_VERSION_MINOR
             )));
         }
 
-        let payload_len = cursor.get_u32() as usize;
+        let payload_len = cursor.get_u16() as usize;
         if payload_len < NONCE_SIZE || payload_len > MAX_PAYLOAD + NONCE_SIZE + 16 {
             return Err(TransportError::Protocol(format!(
                 "invalid payload length: {}",
@@ -153,12 +155,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_bad_magic() {
+    async fn rejects_bad_content_type() {
         let key = FrameCodec::generate_key();
         let codec = FrameCodec::new(&key);
 
-        // Собираем фрейм с неправильным magic
-        let bad_frame = b"\xFF\xFF\xFF\xFF\x01\x00\x00\x00\x10deadbeefdeadbeef";
+        let bad_frame = b"\xFF\x03\x03\x00\x10deadbeefdeadbeef";
         let mut cursor = std::io::Cursor::new(&bad_frame[..]);
         let err = codec.read_frame(&mut cursor).await.unwrap_err();
         assert!(matches!(err, crate::error::TransportError::Protocol(_)));
