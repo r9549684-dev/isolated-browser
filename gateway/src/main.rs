@@ -147,6 +147,10 @@ struct Args {
     /// HMAC key для подписи данных
     #[arg(long, env = "HMAC_KEY", help = "Hex-encoded HMAC key for data signing")]
     hmac_key: String,
+
+    /// Тестовый режим (принимает любой токен)
+    #[arg(long, help = "Test mode: accept any subscription token")]
+    test_mode: bool,
 }
 
 #[tokio::main]
@@ -177,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
         hmac_key.to_vec(),
     ));
     let connection_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let test_mode = args.test_mode;
 
     let listener = TcpListener::bind(args.bind).await?;
     info!("gateway listening on {} (TCP-level steal-TLS, fallback: {}, max_connections: {})", 
@@ -199,9 +204,10 @@ async fn main() -> anyhow::Result<()> {
         let acceptor = acceptor.clone();
         let fallback = fallback_cdn.clone();
         let sub_mgr = subscription_manager.clone();
+        let test = test_mode;
         tokio::spawn(async move {
             let _permit = permit; // Держим permit до завершения соединения
-            if let Err(e) = handle_tcp_connection(tcp, key, server_private_key, fallback, acceptor, sub_mgr).await {
+            if let Err(e) = handle_tcp_connection(tcp, key, server_private_key, fallback, acceptor, sub_mgr, test).await {
                 warn!("client {} error: {}", peer, e);
             }
         });
@@ -219,6 +225,7 @@ async fn handle_tcp_connection(
     fallback_cdn: String,
     acceptor: TlsAcceptor,
     subscription_manager: Arc<SubscriptionManager>,
+    test_mode: bool,
 ) -> Result<(), TransportError> {
     // Читаем ClientHello (до 16KB)
     let mut buffer = vec![0u8; 16384];
@@ -257,8 +264,22 @@ async fn handle_tcp_connection(
                         // В реальности JWT токен должен передаваться отдельно
                         let jwt_token = hex::encode(&ephemeral_public[..8]);
                         
-                        // Валидируем подписку через JWT
-                        match subscription_manager.validate_subscription_token(&jwt_token).await {
+                        // Валидируем подписку через JWT (или пропускаем в test_mode)
+                        let claims = if test_mode {
+                            // В тестовом режиме создаём фейковые claims
+                            Some(auth::Claims {
+                                sub: jwt_token.clone(),
+                                user_id: "test_user".to_string(),
+                                tier: "pro".to_string(),
+                                rate_limit_bps: 3 * 1024 * 1024,
+                                exp: chrono::Utc::now().timestamp() + 86400,
+                                iat: chrono::Utc::now().timestamp(),
+                            })
+                        } else {
+                            subscription_manager.validate_subscription_token(&jwt_token).await
+                        };
+                        
+                        match claims {
                             Some(claims) => {
                                 handle_authenticated_client(tls_stream, key, subscription_manager, claims).await?;
                             }
