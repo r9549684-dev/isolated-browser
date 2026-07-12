@@ -1,0 +1,31 @@
+[package]
+name = "transport-core-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tokio = { version = "1", features = ["full"] }
+transport-core = { path = ".." }
+
+[[bin]]
+name = "fuzz_read_frame"
+path = "fuzz_targets/fuzz_read_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_write_frame"
+path = "fuzz_targets/fuzz_write_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_handshake"
+path = "fuzz_targets/fuzz_handshake.rs"
+test = false
+doc = false
