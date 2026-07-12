@@ -3,6 +3,7 @@ pub mod error;
 pub mod protocol;
 pub mod proxy;
 pub mod rate_limiter;
+pub mod replay;
 pub mod steal;
 pub mod tcp_handler;
 pub mod tls;

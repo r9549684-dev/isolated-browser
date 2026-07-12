@@ -19,4 +19,22 @@ pub enum TransportError {
 
     #[error("Crypto error: {0}")]
     Crypto(String),
+
+    #[error("Frame too large: {0} bytes (max {1})")]
+    FrameTooLarge(usize, usize),
+
+    #[error("Replay detected: counter {0} already seen")]
+    ReplayDetected(u64),
+
+    #[error("Rekey needed: counter {0} reached threshold {1}")]
+    RekeyNeeded(u64, u64),
+
+    #[error("Authentication failed")]
+    AuthFailed,
+
+    #[error("Unknown key id: {0}")]
+    UnknownKeyId(u8),
+
+    #[error("Session error: {0}")]
+    Session(String),
 }

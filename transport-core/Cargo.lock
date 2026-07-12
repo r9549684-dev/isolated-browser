@@ -761,6 +761,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "sha2",
+ "subtle",
  "thiserror",
  "tokio",
  "tokio-rustls",

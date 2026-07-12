@@ -170,9 +170,9 @@ async fn handle_connection(
     let mut tls_stream = tls_client.connect(gateway_host, gateway_port).await?;
 
     // ── 4. Steal-oncall auth frame ──────────────────────────────────────
-    crate::steal::send_auth_frame(&mut tls_stream, &server_public).await?;
+    let client_auth = crate::steal::send_auth_frame(&mut tls_stream, &server_public).await?;
 
-    let codec = FrameCodec::new(&key);
+    let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
     // Первый фрейм — CONNECT-запрос: "host:port"
     let connect_msg = format!("CONNECT {}:{}", target_host, target_port);

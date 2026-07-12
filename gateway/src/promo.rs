@@ -2,6 +2,7 @@ use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -141,14 +142,21 @@ impl PromoManager {
 
     pub async fn verify_token(&self, token: &PromoToken) -> Result<(), PromoError> {
         let expected_signature = self.generate_signature(token);
-        if token.signature != expected_signature {
+        let expected_bytes = hex::decode(&expected_signature).unwrap_or_default();
+        let token_bytes = hex::decode(&token.signature).unwrap_or_default();
+
+        if expected_bytes.len() != token_bytes.len() {
             return Err(PromoError::InvalidSignature);
         }
-        
+        let is_equal: bool = expected_bytes.ct_eq(&token_bytes).into();
+        if !is_equal {
+            return Err(PromoError::InvalidSignature);
+        }
+
         if Utc::now().timestamp() > token.exp {
             return Err(PromoError::Expired);
         }
-        
+
         Ok(())
     }
 
