@@ -118,11 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for handle in handles {
         match handle.await {
-            Ok(Ok(result)) => stats.record(result),
-            Ok(Err(e)) => {
-                stats.errors += 1;
-                eprintln!("Client error: {}", e);
-            }
+            Ok(result) => stats.record(result),
             Err(e) => {
                 stats.errors += 1;
                 eprintln!("Task error: {}", e);
