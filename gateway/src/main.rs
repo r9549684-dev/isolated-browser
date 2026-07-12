@@ -43,6 +43,16 @@ use auth::{AuthManager, Claims};
 const MAX_CONCURRENT_CONNECTIONS: usize = 5000;
 const IDLE_TIMEOUT_SECS: u64 = 300;
 
+/// Фиксированный X25519 static secret для test_mode.
+/// Stress_test знает этот secret и вычисляет соответствующий public key
+/// через x25519_dalek для ECDHE handshake.
+pub const TEST_MODE_SERVER_SECRET: [u8; 32] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+    0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+];
+
 /// Per-IP rate limiter для защиты от handshake flood (до auth).
 /// Sliding window: max N connections per IP per WINDOW_SECS.
 const IP_RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -254,7 +264,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         parse_hex_key(&args.secret)?
     };
-    let server_private_key = parse_hex_key(&args.server_private_key)?;
+    // В test_mode используем фиксированный server_private_key чтобы stress_test
+    // мог использовать соответствующий public key. Реальная безопасность не нужна.
+    let server_private_key = if test_mode {
+        info!("test_mode: using fixed server_private_key for stress test compatibility");
+        TEST_MODE_SERVER_SECRET
+    } else {
+        parse_hex_key(&args.server_private_key)?
+    };
     let fallback_cdn = args.fallback_cdn.clone();
     let hmac_key = parse_hex_key(&args.hmac_key)?;
 

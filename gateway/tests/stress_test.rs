@@ -9,6 +9,23 @@ use rustls::pki_types::ServerName;
 use transport_core::protocol::FrameCodec;
 use transport_core::steal::client_handshake;
 
+/// Фиксированный X25519 static secret сервера в test_mode.
+/// Должен совпадать с gateway::TEST_MODE_SERVER_SECRET.
+const TEST_MODE_SERVER_SECRET: [u8; 32] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+    0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+];
+
+/// Вычисляет server public key из TEST_MODE_SERVER_SECRET.
+fn server_public() -> [u8; 32] {
+    use x25519_dalek::{PublicKey, StaticSecret};
+    let secret = StaticSecret::from(TEST_MODE_SERVER_SECRET);
+    let public = PublicKey::from(&secret);
+    *public.as_bytes()
+}
+
 /// Stress test gateway: 5 классов клиентов.
 ///
 /// Классы:
@@ -42,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!();
 
-    let server_public = [0u8; 32]; // server X25519 static public (test_mode: PFS works with any)
+    let server_public = server_public();
     let _key = [0u8; 32]; // unused: PFS derives session key via ECDHE
 
     let start = Instant::now();
