@@ -226,8 +226,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    let test_mode = args.test_mode;
 
-    let key = parse_hex_key(&args.secret)?;
+    let key = if test_mode {
+        info!("test_mode: using fixed key [0u8; 32]");
+        [0u8; 32]
+    } else {
+        parse_hex_key(&args.secret)?
+    };
     let server_private_key = parse_hex_key(&args.server_private_key)?;
     let fallback_cdn = args.fallback_cdn.clone();
     let hmac_key = parse_hex_key(&args.hmac_key)?;
@@ -241,7 +247,6 @@ async fn main() -> anyhow::Result<()> {
     ));
     let connection_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     let ip_rate_limiter = Arc::new(IpRateLimiter::new());
-    let test_mode = args.test_mode;
 
     let listener = TcpListener::bind(args.bind).await?;
     info!(
@@ -262,10 +267,13 @@ async fn main() -> anyhow::Result<()> {
         let (tcp, peer) = listener.accept().await?;
 
         // Per-IP rate limiting (до auth, до semaphore)
-        if !ip_rate_limiter.check(peer.ip()).await {
-            warn!("IP rate limit exceeded for {}, rejecting", peer.ip());
-            drop(tcp);
-            continue;
+        // В test_mode пропускаем rate limiting для loopback
+        if !test_mode || !peer.ip().is_loopback() {
+            if !ip_rate_limiter.check(peer.ip()).await {
+                warn!("IP rate limit exceeded for {}, rejecting", peer.ip());
+                drop(tcp);
+                continue;
+            }
         }
 
         let permit = match connection_semaphore.clone().try_acquire_owned() {
@@ -352,7 +360,6 @@ async fn handle_tcp_connection(
 
                     match claims {
                         Some(claims) => {
-                            // Создаём codec с session-specific nonce prefixes
                             let codec = FrameCodec::new(&key, s2c_prefix, c2s_prefix, 0);
                             handle_authenticated_client(tls_stream, codec, subscription_manager, claims)
                                 .await?;
@@ -370,8 +377,37 @@ async fn handle_tcp_connection(
             }
         }
         None => {
-            debug!("no auth token — falling back to CDN");
-            let _ = fallback_tcp_proxy(tcp, &fallback_cdn, &client_hello_data).await;
+            if test_mode {
+                debug!("test_mode: no auth in ClientHello — continuing TLS handshake");
+                let prefixed_stream = PrefixedStream::new(tcp, client_hello_data);
+
+                match acceptor.accept(prefixed_stream).await {
+                    Ok(mut tls_stream) => {
+                        let (_ephemeral, _token, c2s_prefix, s2c_prefix) =
+                            read_auth_frame(&mut tls_stream).await?;
+
+                        let claims = auth::Claims {
+                            sub: "test".to_string(),
+                            user_id: "test_user".to_string(),
+                            tier: "pro".to_string(),
+                            rate_limit_bps: 3 * 1024 * 1024,
+                            exp: chrono::Utc::now().timestamp() + 86400,
+                            iat: chrono::Utc::now().timestamp(),
+                        };
+
+                        let codec = FrameCodec::new(&key, s2c_prefix, c2s_prefix, 0);
+                        handle_authenticated_client(tls_stream, codec, subscription_manager, claims)
+                            .await?;
+                    }
+                    Err(e) => {
+                        debug!("TLS accept error: {}", e);
+                        return Err(TransportError::Protocol(format!("TLS accept failed: {}", e)));
+                    }
+                }
+            } else {
+                debug!("no auth token — falling back to CDN");
+                let _ = fallback_tcp_proxy(tcp, &fallback_cdn, &client_hello_data).await;
+            }
         }
     }
 
