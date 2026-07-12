@@ -28,11 +28,11 @@ use transport_core::steal::send_auth_frame;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gateway_addr = "127.0.0.1:9443";
-    let num_valid = 100;
-    let num_invalid = 10;
-    let num_replay = 10;
-    let num_truncated = 10;
-    let num_slow = 10;
+    let num_valid = 800;
+    let num_invalid = 50;
+    let num_replay = 50;
+    let num_truncated = 50;
+    let num_slow = 50;
 
     println!("=== Gateway Stress Test (FrameCodec + 5 client classes) ===");
     println!("Target: {}", gateway_addr);
