@@ -7,7 +7,7 @@ use tokio_rustls::{TlsConnector, rustls::ClientConfig};
 use rustls::pki_types::ServerName;
 
 use transport_core::protocol::FrameCodec;
-use transport_core::steal::send_auth_frame;
+use transport_core::steal::client_handshake;
 
 /// Stress test gateway: 5 классов клиентов.
 ///
@@ -42,8 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!();
 
-    let server_public = [0u8; 32]; // Для test_mode не важен
-    let key = [0u8; 32]; // Должен совпадать с gateway --secret
+    let server_public = [0u8; 32]; // server X25519 static public (test_mode: PFS works with any)
+    let _key = [0u8; 32]; // unused: PFS derives session key via ECDHE
 
     let start = Instant::now();
     let mut handles = vec![];
@@ -54,11 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..num_valid {
         let addr = gateway_addr.to_string();
         let sp = server_public;
-        let k = key;
         handles.push(tokio::spawn(async move {
             tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
-            let result = tokio::time::timeout(Duration::from_secs(10), client_valid(i, &addr, sp, k)).await;
+            let result = tokio::time::timeout(Duration::from_secs(10), client_valid(i, &addr, sp)).await;
             match result {
                 Ok(Ok(r)) => r,
                 _ => ClientResult { class: ClientClass::Valid, success: false, rejected: false, latency: req_start.elapsed() },
@@ -82,11 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..num_replay {
         let addr = gateway_addr.to_string();
         let sp = server_public;
-        let k = key;
         handles.push(tokio::spawn(async move {
             tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
-            let result = tokio::time::timeout(Duration::from_secs(5), client_replay(i, &addr, sp, k)).await;
+            let result = tokio::time::timeout(Duration::from_secs(5), client_replay(i, &addr, sp)).await;
             match result {
                 Ok(Ok(r)) => r,
                 _ => ClientResult { class: ClientClass::Replay, success: false, rejected: true, latency: req_start.elapsed() },
@@ -111,11 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..num_slow {
         let addr = gateway_addr.to_string();
         let sp = server_public;
-        let k = key;
         handles.push(tokio::spawn(async move {
             tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
-            let result = tokio::time::timeout(Duration::from_secs(15), client_slow(i, &addr, sp, k)).await;
+            let result = tokio::time::timeout(Duration::from_secs(15), client_slow(i, &addr, sp)).await;
             match result {
                 Ok(Ok(r)) => r,
                 _ => ClientResult { class: ClientClass::Slow, success: false, rejected: false, latency: req_start.elapsed() },
@@ -253,21 +250,20 @@ async fn make_tls_connection(
     Ok(tls)
 }
 
-/// Class 1: valid — корректный TLS + auth + FrameCodec CONNECT
+/// Class 1: valid — корректный TLS + ECDHE handshake + FrameCodec CONNECT
 async fn client_valid(
     _id: usize,
     addr: &str,
     server_public: [u8; 32],
-    key: [u8; 32],
 ) -> Result<ClientResult, Box<dyn std::error::Error + Send + Sync>> {
     let req_start = Instant::now();
     let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
         let mut tls = make_tls_connection(addr).await?;
-        let client_auth = send_auth_frame(&mut tls, &server_public)
+        let client_auth = client_handshake(&mut tls, &server_public)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
+        let codec = FrameCodec::new(&client_auth.session_key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
         let connect_msg = format!("CONNECT 127.0.0.1:80");
         codec.write_frame(&mut tls, connect_msg.as_bytes())
@@ -333,12 +329,11 @@ async fn client_replay(
     _id: usize,
     addr: &str,
     server_public: [u8; 32],
-    key: [u8; 32],
 ) -> Result<ClientResult, Box<dyn std::error::Error + Send + Sync>> {
     let req_start = Instant::now();
     let mut tls = make_tls_connection(addr).await?;
-    let client_auth = send_auth_frame(&mut tls, &server_public).await?;
-    let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
+    let client_auth = client_handshake(&mut tls, &server_public).await?;
+    let codec = FrameCodec::new(&client_auth.session_key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
     // Пишем фрейм и сохраняем сырые байты
     let connect_msg = b"CONNECT 127.0.0.1:80";
@@ -391,7 +386,6 @@ async fn client_slow(
     _id: usize,
     addr: &str,
     server_public: [u8; 32],
-    key: [u8; 32],
 ) -> Result<ClientResult, Box<dyn std::error::Error + Send + Sync>> {
     let req_start = Instant::now();
     let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
@@ -399,10 +393,10 @@ async fn client_slow(
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client_auth = send_auth_frame(&mut tls, &server_public)
+        let client_auth = client_handshake(&mut tls, &server_public)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-        let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
+        let codec = FrameCodec::new(&client_auth.session_key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 

@@ -70,7 +70,7 @@ impl Socks5Proxy {
         info!("SOCKS5 proxy listening on {}", self.bind_addr);
 
         let gateway_host = std::sync::Arc::new(self.gateway_host);
-        let key = self.key;
+        let _key = self.key;
         let gateway_port = self.gateway_port;
         let sni_pool = self.sni_pool;
         let server_public = self.server_public;
@@ -85,7 +85,7 @@ impl Socks5Proxy {
             let rl = rate_limiter.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_connection(client, &gw_host, gateway_port, key, sni, server_public, rl).await
+                    handle_connection(client, &gw_host, gateway_port, sni, server_public, rl).await
                 {
                     warn!("connection {} error: {}", peer, e);
                 }
@@ -98,7 +98,6 @@ async fn handle_connection(
     mut client: TcpStream,
     gateway_host: &str,
     gateway_port: u16,
-    key: [u8; 32],
     sni_pool: Vec<String>,
     server_public: [u8; 32],
     rate_limiter: Option<Arc<RateLimiter>>,
@@ -169,10 +168,10 @@ async fn handle_connection(
     let mut tls_client = TlsClient::new(sni_pool)?;
     let mut tls_stream = tls_client.connect(gateway_host, gateway_port).await?;
 
-    // ── 4. Steal-oncall auth frame ──────────────────────────────────────
-    let client_auth = crate::steal::send_auth_frame(&mut tls_stream, &server_public).await?;
+    // ── 4. ECDHE handshake (forward secrecy) ───────────────────────────
+    let client_auth = crate::steal::client_handshake(&mut tls_stream, &server_public).await?;
 
-    let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
+    let codec = FrameCodec::new(&client_auth.session_key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
     // Первый фрейм — CONNECT-запрос: "host:port"
     let connect_msg = format!("CONNECT {}:{}", target_host, target_port);

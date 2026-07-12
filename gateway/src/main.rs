@@ -32,7 +32,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
 use transport_core::protocol::FrameCodec;
-use transport_core::steal::{read_auth_frame, verify_server_auth};
+use transport_core::steal::{read_auth_frame, server_derive_session};
 use transport_core::tcp_handler::{extract_auth_from_clienthello, fallback_tcp_proxy};
 use transport_core::error::TransportError;
 
@@ -248,8 +248,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let test_mode = args.test_mode;
 
-    let key = if test_mode {
-        info!("test_mode: using fixed key [0u8; 32]");
+    let _key = if test_mode {
+        info!("test_mode: PFS active — session keys derived via ECDHE");
         [0u8; 32]
     } else {
         parse_hex_key(&args.secret)?
@@ -315,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(e) =
-                handle_tcp_connection(tcp, key, server_private_key, fallback, acceptor, sub_mgr, test).await
+                handle_tcp_connection(tcp, server_private_key, fallback, acceptor, sub_mgr, test).await
             {
                 debug!("client {} error: {:?}", peer, e);
             }
@@ -325,7 +325,6 @@ async fn main() -> anyhow::Result<()> {
 
 async fn handle_tcp_connection(
     mut tcp: TcpStream,
-    key: [u8; 32],
     server_private_key: [u8; 32],
     fallback_cdn: String,
     acceptor: TlsAcceptor,
@@ -345,44 +344,46 @@ async fn handle_tcp_connection(
     match auth_result {
         Some((auth_token, _)) => {
             let ephemeral_public: [u8; 32] = auth_token;
-            let expected_token = generate_expected_token(&server_private_key, &ephemeral_public);
-
-            // Constant-time verification + unified error response
-            if !verify_server_auth(&server_private_key, &ephemeral_public, &expected_token) {
-                send_unified_error(&mut tcp).await;
-                return Err(TransportError::AuthFailed);
-            }
-
-            debug!("auth OK — continuing TLS handshake");
+            debug!("pre-TLS: auth token present in ClientHello — continuing TLS handshake");
 
             let prefixed_stream = PrefixedStream::new(tcp, client_hello_data);
 
             match acceptor.accept(prefixed_stream).await {
                 Ok(mut tls_stream) => {
-                    // Читаем auth frame после TLS handshake (c2s/s2c prefixes)
-                    let (_ephemeral, _token, c2s_prefix, s2c_prefix) =
+                    let (ephemeral_public, auth_token, c2s_prefix, s2c_prefix) =
                         read_auth_frame(&mut tls_stream).await?;
 
-                    let jwt_token = hex::encode(&ephemeral_public[..8]);
+                    match server_derive_session(&server_private_key, &ephemeral_public, &auth_token) {
+                        Some((server_ephemeral_public, session_key)) => {
+                            tls_stream.write_all(&server_ephemeral_public).await?;
+                            tls_stream.flush().await?;
 
-                    let claims = if test_mode {
-                        Some(auth::Claims {
-                            sub: jwt_token.clone(),
-                            user_id: "test_user".to_string(),
-                            tier: "pro".to_string(),
-                            rate_limit_bps: 3 * 1024 * 1024,
-                            exp: chrono::Utc::now().timestamp() + 86400,
-                            iat: chrono::Utc::now().timestamp(),
-                        })
-                    } else {
-                        subscription_manager.validate_subscription_token(&jwt_token).await
-                    };
+                            let jwt_token = hex::encode(&ephemeral_public[..8]);
 
-                    match claims {
-                        Some(claims) => {
-                            let codec = FrameCodec::new(&key, s2c_prefix, c2s_prefix, 0);
-                            handle_authenticated_client(tls_stream, codec, subscription_manager, claims)
-                                .await?;
+                            let claims = if test_mode {
+                                Some(auth::Claims {
+                                    sub: jwt_token.clone(),
+                                    user_id: "test_user".to_string(),
+                                    tier: "pro".to_string(),
+                                    rate_limit_bps: 3 * 1024 * 1024,
+                                    exp: chrono::Utc::now().timestamp() + 86400,
+                                    iat: chrono::Utc::now().timestamp(),
+                                })
+                            } else {
+                                subscription_manager.validate_subscription_token(&jwt_token).await
+                            };
+
+                            match claims {
+                                Some(claims) => {
+                                    let codec = FrameCodec::new(&session_key, s2c_prefix, c2s_prefix, 0);
+                                    handle_authenticated_client(tls_stream, codec, subscription_manager, claims)
+                                        .await?;
+                                }
+                                None => {
+                                    send_unified_error_tls(&mut tls_stream).await;
+                                    return Err(TransportError::AuthFailed);
+                                }
+                            }
                         }
                         None => {
                             send_unified_error_tls(&mut tls_stream).await;
@@ -403,21 +404,32 @@ async fn handle_tcp_connection(
 
                 match acceptor.accept(prefixed_stream).await {
                     Ok(mut tls_stream) => {
-                        let (_ephemeral, _token, c2s_prefix, s2c_prefix) =
+                        let (ephemeral_public, auth_token, c2s_prefix, s2c_prefix) =
                             read_auth_frame(&mut tls_stream).await?;
 
-                        let claims = auth::Claims {
-                            sub: "test".to_string(),
-                            user_id: "test_user".to_string(),
-                            tier: "pro".to_string(),
-                            rate_limit_bps: 3 * 1024 * 1024,
-                            exp: chrono::Utc::now().timestamp() + 86400,
-                            iat: chrono::Utc::now().timestamp(),
-                        };
+                        match server_derive_session(&server_private_key, &ephemeral_public, &auth_token) {
+                            Some((server_ephemeral_public, session_key)) => {
+                                tls_stream.write_all(&server_ephemeral_public).await?;
+                                tls_stream.flush().await?;
 
-                        let codec = FrameCodec::new(&key, s2c_prefix, c2s_prefix, 0);
-                        handle_authenticated_client(tls_stream, codec, subscription_manager, claims)
-                            .await?;
+                                let claims = auth::Claims {
+                                    sub: "test".to_string(),
+                                    user_id: "test_user".to_string(),
+                                    tier: "pro".to_string(),
+                                    rate_limit_bps: 3 * 1024 * 1024,
+                                    exp: chrono::Utc::now().timestamp() + 86400,
+                                    iat: chrono::Utc::now().timestamp(),
+                                };
+
+                                let codec = FrameCodec::new(&session_key, s2c_prefix, c2s_prefix, 0);
+                                handle_authenticated_client(tls_stream, codec, subscription_manager, claims)
+                                    .await?;
+                            }
+                            None => {
+                                send_unified_error_tls(&mut tls_stream).await;
+                                return Err(TransportError::AuthFailed);
+                            }
+                        }
                     }
                     Err(e) => {
                         debug!("TLS accept error: {}", e);
@@ -434,34 +446,10 @@ async fn handle_tcp_connection(
     Ok(())
 }
 
-/// Отправляет унифицированную ошибку (без раскрытия причины) через TCP.
-/// Anti timing/oracle leak: одинаковый ответ на все типы отказа.
-async fn send_unified_error(tcp: &mut TcpStream) {
-    let _ = tcp.write_all(b"ERR").await;
-    let _ = tcp.flush().await;
-}
-
 /// Отправляет унифицированную ошибку через TLS stream.
 async fn send_unified_error_tls(tls: &mut tokio_rustls::server::TlsStream<PrefixedStream>) {
     let _ = tls.write_all(b"ERR").await;
     let _ = tls.flush().await;
-}
-
-fn generate_expected_token(server_secret: &[u8; 32], ephemeral_public: &[u8; 32]) -> [u8; 32] {
-    use x25519_dalek::{StaticSecret, PublicKey};
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-
-    let server_static = StaticSecret::from(*server_secret);
-    let client_public = PublicKey::from(*ephemeral_public);
-    let shared_secret = server_static.diffie_hellman(&client_public);
-
-    let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
-    let mut expected_token = [0u8; 32];
-    hkdf.expand(b"isolated-browser-auth", &mut expected_token)
-        .expect("HKDF expand failed");
-
-    expected_token
 }
 
 async fn handle_authenticated_client(
