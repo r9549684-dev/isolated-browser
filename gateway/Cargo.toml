@@ -36,3 +36,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 [[test]]
 name = "stress_test"
 harness = false
+
+[[test]]
+name = "soak_test"
+harness = false
