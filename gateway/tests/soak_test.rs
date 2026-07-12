@@ -76,7 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     soak_connect(&addr, &sp),
                 ).await;
                 match result {
-                    Ok(Ok(())) => succ.fetch_add(1, Ordering::Relaxed),
+                    Ok(Ok(())) => {
+                        succ.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
                     Ok(Err(e)) => {
                         fail.fetch_add(1, Ordering::Relaxed);
                         Some(e)
