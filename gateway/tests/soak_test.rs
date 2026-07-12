@@ -93,13 +93,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for h in handles {
-            if let Ok(Some(e)) = h.await {
-                if !first_err_logged {
-                    eprintln!("first soak_connect error: {:?}", e);
-                    first_err_logged = true;
+            match h.await {
+                Ok(Some(e)) => {
+                    if !first_err_logged {
+                        eprintln!("first soak_connect error: {:?}", e);
+                        first_err_logged = true;
+                    }
+                }
+                Ok(None) => {}
+                Err(join_err) => {
+                    if !first_err_logged {
+                        eprintln!("task join error: {:?}", join_err);
+                        first_err_logged = true;
+                    }
                 }
             }
         }
+
+        // Pace: не крутить цикл быстрее чем соединения успевают создаваться.
+        // Без sleep цикл делает тысячи итераций/sec без реальной работы.
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let elapsed = start.elapsed();
         let total_succ = success.load(Ordering::Relaxed);
