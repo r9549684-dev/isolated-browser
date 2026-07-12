@@ -249,7 +249,7 @@ async fn client_valid(
 
         let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
-        let connect_msg = format!("CONNECT example.com:443");
+        let connect_msg = format!("CONNECT 127.0.0.1:80");
         codec.write_frame(&mut tls, connect_msg.as_bytes())
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
@@ -321,7 +321,7 @@ async fn client_replay(
     let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
     // Пишем фрейм и сохраняем сырые байты
-    let connect_msg = b"CONNECT example.com:443";
+    let connect_msg = b"CONNECT 127.0.0.1:80";
     let mut frame_buf: Vec<u8> = Vec::new();
     codec.write_frame(&mut frame_buf, connect_msg).await?;
     tls.write_all(&frame_buf).await?;
@@ -387,7 +387,7 @@ async fn client_slow(
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         codec
-            .write_frame(&mut tls, b"CONNECT example.com:443")
+            .write_frame(&mut tls, b"CONNECT 127.0.0.1:80")
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let ack = codec.read_frame(&mut tls)
