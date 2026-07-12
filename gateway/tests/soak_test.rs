@@ -60,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = start + Duration::from_secs(duration_secs);
 
     let mut wave = 0;
+    let mut first_err_logged = false;
     while Instant::now() < deadline {
         wave += 1;
         let mut handles = vec![];
@@ -70,27 +71,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let succ = success.clone();
             let fail = failures.clone();
             handles.push(tokio::spawn(async move {
-                match tokio::time::timeout(
+                let result = tokio::time::timeout(
                     Duration::from_secs(15),
                     soak_connect(&addr, &sp),
-                ).await {
+                ).await;
+                match result {
                     Ok(Ok(())) => succ.fetch_add(1, Ordering::Relaxed),
-                    _ => fail.fetch_add(1, Ordering::Relaxed),
-                };
+                    Ok(Err(e)) => {
+                        fail.fetch_add(1, Ordering::Relaxed);
+                        Some(e)
+                    }
+                    Err(_) => {
+                        fail.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                }
             }));
         }
 
         for h in handles {
-            let _ = h.await;
+            if let Ok(Some(e)) = h.await {
+                if !first_err_logged {
+                    eprintln!("first soak_connect error: {:?}", e);
+                    first_err_logged = true;
+                }
+            }
         }
 
         let elapsed = start.elapsed();
         let total_succ = success.load(Ordering::Relaxed);
         let total_fail = failures.load(Ordering::Relaxed);
-        println!(
-            "[{:>6.1}s] wave {}: total success={}, failures={}",
-            elapsed.as_secs_f64(), wave, total_succ, total_fail
-        );
+        if wave <= 5 || wave % 100 == 0 {
+            println!(
+                "[{:>6.1}s] wave {}: total success={}, failures={}",
+                elapsed.as_secs_f64(), wave, total_succ, total_fail
+            );
+        }
     }
 
     let total = success.load(Ordering::Relaxed) + failures.load(Ordering::Relaxed);
