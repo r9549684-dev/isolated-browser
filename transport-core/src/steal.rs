@@ -35,6 +35,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use crate::error::TransportError;
 use crate::protocol::FrameCodec;
+use crate::protocol::{REKEY_INIT_MAGIC, REKEY_ACK_MAGIC};
 
 pub const AUTH_FRAME_SIZE: usize = 80;
 pub const AUTH_RESPONSE_SIZE: usize = 32;
@@ -193,6 +194,77 @@ pub async fn establish_session(
     );
 
     Ok(codec)
+}
+
+/// Инициирует rekey: сервер генерирует новый ключ и отправляет REKEY_INIT
+/// через существующий FrameCodec (зашифрован старым ключом).
+/// Формат plaintext: REKEY_INIT_MAGIC(6) + new_kid(1) + new_key(32) = 39 bytes.
+pub async fn send_rekey_init<W: AsyncWrite + Unpin>(
+    codec: &FrameCodec,
+    writer: &mut W,
+    new_kid: u8,
+    new_key: &[u8; 32],
+) -> Result<(), TransportError> {
+    let mut payload = Vec::with_capacity(REKEY_INIT_MAGIC.len() + 1 + 32);
+    payload.extend_from_slice(REKEY_INIT_MAGIC);
+    payload.push(new_kid);
+    payload.extend_from_slice(new_key);
+    codec.write_frame(writer, &payload).await
+}
+
+/// Клиент читает REKEY_INIT, применяет rekey, отправляет REKEY_ACK.
+/// Формат REKEY_INIT plaintext: REKEY_INIT_MAGIC(6) + new_kid(1) + new_key(32).
+/// Формат REKEY_ACK plaintext: REKEY_ACK_MAGIC(9) + new_kid(1).
+pub async fn client_handle_rekey<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    codec: &FrameCodec,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<(u8, [u8; 32]), TransportError> {
+    let frame = codec.read_frame(reader).await?;
+    if frame.len() < REKEY_INIT_MAGIC.len() + 1 + 32 {
+        return Err(TransportError::Protocol("REKEY_INIT too short".into()));
+    }
+    if &frame[..REKEY_INIT_MAGIC.len()] != REKEY_INIT_MAGIC {
+        return Err(TransportError::Protocol("bad REKEY_INIT magic".into()));
+    }
+    let new_kid = frame[REKEY_INIT_MAGIC.len()];
+    let mut new_key = [0u8; 32];
+    new_key.copy_from_slice(&frame[REKEY_INIT_MAGIC.len() + 1..REKEY_INIT_MAGIC.len() + 1 + 32]);
+
+    codec.start_rekey(new_kid, &new_key);
+
+    let mut ack = Vec::with_capacity(REKEY_ACK_MAGIC.len() + 1);
+    ack.extend_from_slice(REKEY_ACK_MAGIC);
+    ack.push(new_kid);
+    codec.write_frame(writer, &ack).await?;
+
+    Ok((new_kid, new_key))
+}
+
+/// Сервер читает REKEY_ACK и применяет rekey (start_rekey).
+/// Формат REKEY_ACK plaintext: REKEY_ACK_MAGIC(9) + new_kid(1).
+pub async fn server_handle_rekey_ack<R: AsyncRead + Unpin>(
+    codec: &FrameCodec,
+    reader: &mut R,
+    new_kid: u8,
+    new_key: &[u8; 32],
+) -> Result<(), TransportError> {
+    let frame = codec.read_frame(reader).await?;
+    if frame.len() < REKEY_ACK_MAGIC.len() + 1 {
+        return Err(TransportError::Protocol("REKEY_ACK too short".into()));
+    }
+    if &frame[..REKEY_ACK_MAGIC.len()] != REKEY_ACK_MAGIC {
+        return Err(TransportError::Protocol("bad REKEY_ACK magic".into()));
+    }
+    let ack_kid = frame[REKEY_ACK_MAGIC.len()];
+    if ack_kid != new_kid {
+        return Err(TransportError::Protocol(format!(
+            "REKEY_ACK kid mismatch: {} != {}",
+            ack_kid, new_kid
+        )));
+    }
+    codec.start_rekey(new_kid, new_key);
+    Ok(())
 }
 
 #[cfg(test)]

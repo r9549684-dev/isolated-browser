@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use bytes::{BufMut, BytesMut};
 use chacha20poly1305::{
@@ -55,15 +55,32 @@ pub const REKEY_THRESHOLD: u64 = 0xF000_0000;
 pub const REKEY_HARD_LIMIT: u64 = 0x1_0000_0000;
 
 /// Размер sliding window для replay protection (в фреймах).
+/// Размер sliding window для replay protection (в фреймах).
 pub const REPLAY_WINDOW_SIZE: u64 = 64;
+/// Количество фреймов после rekey, в течение которого старый ключ ещё принимается.
+pub const REKEY_OVERLAP_FRAMES: u64 = 256;
+
+/// Control frame magic bytes для rekey протокола.
+pub const REKEY_INIT_MAGIC: &[u8] = b"REKEY\0";
+pub const REKEY_ACK_MAGIC: &[u8] = b"REKEYACK\0";
+
+/// Внутреннее состояние codec: active cipher/kid + optional prev (overlap).
+/// Защищено RwLock: read lock для write_frame/read_frame, write lock для rekey.
+struct CodecState {
+    cipher: ChaCha20Poly1305,
+    kid: u8,
+    /// Previous (kid, cipher) — валиден во время overlap window после rekey.
+    prev: Option<(u8, ChaCha20Poly1305)>,
+    /// Счётчик фреймов после rekey — для auto complete_rekey.
+    frames_since_rekey: u64,
+}
 
 pub struct FrameCodec {
-    cipher: ChaCha20Poly1305,
+    state: RwLock<CodecState>,
     send_prefix: [u8; PREFIX_SIZE],
     recv_prefix: [u8; PREFIX_SIZE],
     send_counter: AtomicU64,
     recv_replay: Mutex<ReplayWindow>,
-    kid: u8,
 }
 
 impl FrameCodec {
@@ -75,12 +92,16 @@ impl FrameCodec {
     ) -> Self {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
         Self {
-            cipher,
+            state: RwLock::new(CodecState {
+                cipher,
+                kid,
+                prev: None,
+                frames_since_rekey: 0,
+            }),
             send_prefix,
             recv_prefix,
             send_counter: AtomicU64::new(0),
             recv_replay: Mutex::new(ReplayWindow::new(REPLAY_WINDOW_SIZE)),
-            kid,
         }
     }
 
@@ -97,11 +118,42 @@ impl FrameCodec {
     }
 
     pub fn kid(&self) -> u8 {
-        self.kid
+        self.state.read().expect("codec lock poisoned").kid
     }
 
     pub fn send_counter(&self) -> u64 {
         self.send_counter.load(Ordering::SeqCst)
+    }
+
+    /// Начинает rekey: сохраняет старый cipher в prev, устанавливает новый.
+    /// После вызова: write_frame использует новый ключ, read_frame принимает
+    /// оба kid (overlap window) до complete_rekey() или REKEY_OVERLAP_FRAMES.
+    pub fn start_rekey(&self, new_kid: u8, new_key: &[u8; 32]) {
+        let mut state = self.state.write().expect("codec lock poisoned");
+        // Сохраняем old cipher в prev (clone через пересоздание из ключа невозможно,
+        // поэтому перемещаем cipher в prev и создаём новый active).
+        let old_cipher = ChaCha20Poly1305::new(Key::from_slice(&[0u8; 32]));
+        // Заменяем: old active → prev, new → active
+        let prev_kid = state.kid;
+        // Берём старый cipher, заменяем на placeholder, кладём старый в prev
+        let old = std::mem::replace(&mut state.cipher, old_cipher);
+        let new_cipher = ChaCha20Poly1305::new(Key::from_slice(new_key));
+        state.cipher = new_cipher;
+        state.prev = Some((prev_kid, old));
+        state.frames_since_rekey = 0;
+        state.kid = new_kid;
+    }
+
+    /// Завершает rekey: удаляет prev_cipher (конец overlap window).
+    /// Старый ключ больше не принимается.
+    pub fn complete_rekey(&self) {
+        let mut state = self.state.write().expect("codec lock poisoned");
+        state.prev = None;
+    }
+
+    /// Возвращает true если overlap window активен (prev_cipher существует).
+    pub fn is_rekey_overlap(&self) -> bool {
+        self.state.read().expect("codec lock poisoned").prev.is_some()
     }
 
     /// Кодирует plaintext в бинарный фрейм и пишет в writer.
@@ -126,29 +178,36 @@ impl FrameCodec {
         nonce_bytes[PREFIX_SIZE..].copy_from_slice(&(counter as u32).to_be_bytes());
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = self
-            .cipher
-            .encrypt(nonce, plaintext)
-            .map_err(|e| TransportError::Crypto(e.to_string()))?;
+        // Encrypt holding read lock, then release before async write.
+        let (kid, buf) = {
+            let state = self.state.read().expect("codec lock poisoned");
+            let ciphertext = state
+                .cipher
+                .encrypt(nonce, plaintext)
+                .map_err(|e| TransportError::Crypto(e.to_string()))?;
 
-        let body_len = (KID_SIZE + COUNTER_SIZE + ciphertext.len()) as u16;
-
-        let mut buf =
-            BytesMut::with_capacity(TLS_RECORD_HEADER_SIZE + KID_SIZE + COUNTER_SIZE + ciphertext.len());
-        buf.put_u8(TLS_CONTENT_TYPE);
-        buf.put_u8(TLS_VERSION_MAJOR);
-        buf.put_u8(TLS_VERSION_MINOR);
-        buf.put_u16(body_len);
-        buf.put_u8(self.kid);
-        buf.put_u32(counter as u32);
-        buf.put_slice(&ciphertext);
+            let body_len = (KID_SIZE + COUNTER_SIZE + ciphertext.len()) as u16;
+            let mut buf = BytesMut::with_capacity(
+                TLS_RECORD_HEADER_SIZE + KID_SIZE + COUNTER_SIZE + ciphertext.len(),
+            );
+            buf.put_u8(TLS_CONTENT_TYPE);
+            buf.put_u8(TLS_VERSION_MAJOR);
+            buf.put_u8(TLS_VERSION_MINOR);
+            buf.put_u16(body_len);
+            buf.put_u8(state.kid);
+            buf.put_u32(counter as u32);
+            buf.put_slice(&ciphertext);
+            (state.kid, buf)
+        };
 
         writer.write_all(&buf).await?;
         writer.flush().await?;
+        let _ = kid;
         Ok(())
     }
 
     /// Читает один фрейм из reader, проверяет replay, расшифровывает.
+    /// Во время overlap window принимает оба kid (active и prev).
     pub async fn read_frame<R: AsyncRead + Unpin>(
         &self,
         reader: &mut R,
@@ -189,9 +248,6 @@ impl FrameCodec {
         reader.read_exact(&mut body).await?;
 
         let kid = body[0];
-        if kid != self.kid {
-            return Err(TransportError::UnknownKeyId(kid));
-        }
 
         let counter = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as u64;
         let ciphertext = &body[KID_SIZE + COUNTER_SIZE..];
@@ -211,10 +267,34 @@ impl FrameCodec {
         nonce_bytes[PREFIX_SIZE..].copy_from_slice(&(counter as u32).to_be_bytes());
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let plaintext = self
-            .cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| TransportError::Crypto(e.to_string()))?;
+        let mut state = self.state.write().expect("codec lock poisoned");
+
+        // Downgrade protection: reject kid < active (monotonic).
+        // Accept: active kid OR prev kid (during overlap).
+        let plaintext = if kid == state.kid {
+            state
+                .cipher
+                .decrypt(nonce, ciphertext)
+                .map_err(|e| TransportError::Crypto(e.to_string()))?
+        } else if let Some((prev_kid, ref prev_cipher)) = state.prev {
+            if kid == prev_kid {
+                prev_cipher
+                    .decrypt(nonce, ciphertext)
+                    .map_err(|e| TransportError::Crypto(e.to_string()))?
+            } else {
+                return Err(TransportError::UnknownKeyId(kid));
+            }
+        } else {
+            return Err(TransportError::UnknownKeyId(kid));
+        };
+
+        // Auto-complete rekey after overlap window.
+        if state.prev.is_some() {
+            state.frames_since_rekey += 1;
+            if state.frames_since_rekey >= REKEY_OVERLAP_FRAMES {
+                state.prev = None;
+            }
+        }
 
         Ok(plaintext)
     }
@@ -404,5 +484,108 @@ mod tests {
     fn test_rekey_threshold() {
         assert!(REKEY_THRESHOLD < REKEY_HARD_LIMIT);
         assert!(REKEY_THRESHOLD < u32::MAX as u64);
+    }
+
+    #[tokio::test]
+    async fn rekey_produces_new_key() {
+        let key1 = FrameCodec::generate_key();
+        let prefix = FrameCodec::generate_prefix();
+        let codec = FrameCodec::new(&key1, prefix, prefix, 0);
+
+        let mut buf: Vec<u8> = Vec::new();
+        codec.write_frame(&mut buf, b"old").await.unwrap();
+        assert_eq!(codec.kid(), 0);
+
+        let key2 = FrameCodec::generate_key();
+        codec.start_rekey(1, &key2);
+
+        assert_eq!(codec.kid(), 1);
+        assert!(codec.is_rekey_overlap());
+
+        let mut buf2: Vec<u8> = Vec::new();
+        codec.write_frame(&mut buf2, b"new").await.unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf2);
+        let decoded = codec.read_frame(&mut cursor).await.unwrap();
+        assert_eq!(decoded, b"new");
+    }
+
+    #[tokio::test]
+    async fn rekey_overlap_accepts_old_kid() {
+        let key1 = FrameCodec::generate_key();
+        let key2 = FrameCodec::generate_key();
+        let prefix = FrameCodec::generate_prefix();
+
+        let writer_old = FrameCodec::new(&key1, prefix, prefix, 0);
+        let reader = FrameCodec::new(&key1, prefix, prefix, 0);
+
+        let mut old_buf: Vec<u8> = Vec::new();
+        writer_old.write_frame(&mut old_buf, b"old-key-frame").await.unwrap();
+
+        reader.start_rekey(1, &key2);
+        assert!(reader.is_rekey_overlap());
+
+        let mut cursor = std::io::Cursor::new(old_buf);
+        let decoded = reader.read_frame(&mut cursor).await.unwrap();
+        assert_eq!(decoded, b"old-key-frame");
+    }
+
+    #[tokio::test]
+    async fn rekey_complete_rejects_old_kid() {
+        let key1 = FrameCodec::generate_key();
+        let key2 = FrameCodec::generate_key();
+        let prefix = FrameCodec::generate_prefix();
+
+        let writer_old = FrameCodec::new(&key1, prefix, prefix, 0);
+        let reader = FrameCodec::new(&key1, prefix, prefix, 0);
+
+        let mut old_buf: Vec<u8> = Vec::new();
+        writer_old.write_frame(&mut old_buf, b"old").await.unwrap();
+
+        reader.start_rekey(1, &key2);
+        reader.complete_rekey();
+        assert!(!reader.is_rekey_overlap());
+
+        let mut cursor = std::io::Cursor::new(old_buf);
+        let err = reader.read_frame(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, TransportError::UnknownKeyId(0)));
+    }
+
+    #[tokio::test]
+    async fn rekey_downgrade_rejected() {
+        let key1 = FrameCodec::generate_key();
+        let prefix = FrameCodec::generate_prefix();
+        let codec = FrameCodec::new(&key1, prefix, prefix, 5);
+
+        let key2 = FrameCodec::generate_key();
+        codec.start_rekey(10, &key2);
+
+        let writer_low = FrameCodec::new(&key1, prefix, prefix, 3);
+        let mut buf: Vec<u8> = Vec::new();
+        writer_low.write_frame(&mut buf, b"downgrade").await.unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let err = codec.read_frame(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, TransportError::UnknownKeyId(3)));
+    }
+
+    #[tokio::test]
+    async fn rekey_auto_complete_after_overlap() {
+        let key1 = FrameCodec::generate_key();
+        let key2 = FrameCodec::generate_key();
+        let prefix = FrameCodec::generate_prefix();
+        let codec = FrameCodec::new(&key1, prefix, prefix, 0);
+
+        codec.start_rekey(1, &key2);
+        assert!(codec.is_rekey_overlap());
+
+        for _ in 0..REKEY_OVERLAP_FRAMES {
+            let mut buf: Vec<u8> = Vec::new();
+            codec.write_frame(&mut buf, b"x").await.unwrap();
+            let mut cursor = std::io::Cursor::new(buf);
+            codec.read_frame(&mut cursor).await.unwrap();
+        }
+
+        assert!(!codec.is_rekey_overlap());
     }
 }

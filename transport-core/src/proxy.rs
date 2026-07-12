@@ -229,6 +229,31 @@ async fn relay(
             frame = codec.read_frame(&mut gateway) => {
                 match frame {
                     Ok(data) => {
+                        // Проверка на REKEY_INIT control frame от сервера.
+                        if data.len() >= crate::protocol::REKEY_INIT_MAGIC.len()
+                            && &data[..crate::protocol::REKEY_INIT_MAGIC.len()]
+                                == crate::protocol::REKEY_INIT_MAGIC
+                        {
+                            debug!("received REKEY_INIT from gateway — performing rekey");
+                            // REKEY_INIT уже прочитан. Извлекаем new_kid + new_key,
+                            // отправляем REKEY_ACK, применяем rekey.
+                            let magic_len = crate::protocol::REKEY_INIT_MAGIC.len();
+                            if data.len() < magic_len + 1 + 32 {
+                                return Err(TransportError::Protocol("REKEY_INIT too short".into()));
+                            }
+                            let new_kid = data[magic_len];
+                            let mut new_key = [0u8; 32];
+                            new_key.copy_from_slice(&data[magic_len + 1..magic_len + 1 + 32]);
+
+                            codec.start_rekey(new_kid, &new_key);
+
+                            let mut ack = Vec::with_capacity(crate::protocol::REKEY_ACK_MAGIC.len() + 1);
+                            ack.extend_from_slice(crate::protocol::REKEY_ACK_MAGIC);
+                            ack.push(new_kid);
+                            codec.write_frame(&mut gateway, &ack).await?;
+                            debug!("rekey completed on client side: kid={}", new_kid);
+                            continue;
+                        }
                         // Rate limiting (client-side) — async wait
                         if let Some(ref rl) = rate_limiter {
                             rl.wait_for_bytes_async(data.len() as u64).await;

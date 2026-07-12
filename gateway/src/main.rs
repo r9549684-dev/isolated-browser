@@ -32,7 +32,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
 use transport_core::protocol::FrameCodec;
-use transport_core::steal::{read_auth_frame, server_derive_session};
+use transport_core::steal::{read_auth_frame, server_derive_session, send_rekey_init, server_handle_rekey_ack};
 use transport_core::tcp_handler::{extract_auth_from_clienthello, fallback_tcp_proxy};
 use transport_core::error::TransportError;
 
@@ -594,9 +594,27 @@ async fn relay(
                         return Ok(());
                     }
                     Ok(Err(TransportError::RekeyNeeded(c, threshold))) => {
-                        warn!("rekey needed: counter {} >= {}", c, threshold);
-                        codec.write_frame(&mut gateway_side, b"REKEY").await?;
-                        return Ok(());
+                        warn!("rekey needed: counter {} >= {} — initiating rekey handshake", c, threshold);
+                        let new_key = FrameCodec::generate_key();
+                        let new_kid = codec.kid().wrapping_add(1);
+                        match send_rekey_init(&codec, &mut gateway_side, new_kid, &new_key).await {
+                            Ok(()) => {
+                                match server_handle_rekey_ack(&codec, &mut gateway_side, new_kid, &new_key).await {
+                                    Ok(()) => {
+                                        info!("rekey completed: new kid={}", new_kid);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        warn!("rekey ack failed: {:?}", e);
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("rekey init send failed: {:?}", e);
+                                return Ok(());
+                            }
+                        }
                     }
                     Ok(Err(e)) => return Err(e),
                     Err(_) => {
