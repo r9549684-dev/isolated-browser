@@ -53,14 +53,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sp = server_public;
         let k = key;
         handles.push(tokio::spawn(async move {
-            client_valid(i, &addr, sp, k).await
+            let req_start = Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(10), client_valid(i, &addr, sp, k)).await;
+            match result {
+                Ok(Ok(r)) => r,
+                _ => ClientResult { class: ClientClass::Valid, success: false, rejected: false, latency: req_start.elapsed() },
+            }
         }));
     }
 
     for i in 0..num_invalid {
         let addr = gateway_addr.to_string();
         handles.push(tokio::spawn(async move {
-            client_invalid_auth(i, &addr).await
+            let req_start = Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(5), client_invalid_auth(i, &addr)).await;
+            match result {
+                Ok(Ok(r)) => r,
+                _ => ClientResult { class: ClientClass::InvalidAuth, success: false, rejected: true, latency: req_start.elapsed() },
+            }
         }));
     }
 
@@ -69,14 +79,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sp = server_public;
         let k = key;
         handles.push(tokio::spawn(async move {
-            client_replay(i, &addr, sp, k).await
+            let req_start = Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(5), client_replay(i, &addr, sp, k)).await;
+            match result {
+                Ok(Ok(r)) => r,
+                _ => ClientResult { class: ClientClass::Replay, success: false, rejected: true, latency: req_start.elapsed() },
+            }
         }));
     }
 
     for i in 0..num_truncated {
         let addr = gateway_addr.to_string();
         handles.push(tokio::spawn(async move {
-            client_truncated(i, &addr).await
+            let req_start = Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(5), client_truncated(i, &addr)).await;
+            match result {
+                Ok(Ok(r)) => r,
+                _ => ClientResult { class: ClientClass::Truncated, success: false, rejected: true, latency: req_start.elapsed() },
+            }
         }));
     }
 
@@ -85,7 +105,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sp = server_public;
         let k = key;
         handles.push(tokio::spawn(async move {
-            client_slow(i, &addr, sp, k).await
+            let req_start = Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(15), client_slow(i, &addr, sp, k)).await;
+            match result {
+                Ok(Ok(r)) => r,
+                _ => ClientResult { class: ClientClass::Slow, success: false, rejected: false, latency: req_start.elapsed() },
+            }
         }));
     }
 
