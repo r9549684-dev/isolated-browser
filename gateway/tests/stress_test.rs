@@ -177,13 +177,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let total = num_valid + num_invalid + num_replay + num_truncated + num_slow;
-    if stats.valid_success == num_valid && stats.errors == 0 {
+    let valid_target = num_valid + num_slow;
+    if stats.valid_success == valid_target && stats.errors == 0 {
         println!("\n✓ Stress test PASSED ({}/{} valid clients succeeded)", stats.valid_success, total);
         Ok(())
     } else {
         println!(
             "\n✗ Stress test FAILED ({}/{} valid, {} errors)",
-            stats.valid_success, num_valid, stats.errors
+            stats.valid_success, valid_target, stats.errors
         );
         Err("Stress test failed".into())
     }
