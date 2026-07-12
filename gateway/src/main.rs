@@ -47,6 +47,9 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 /// Sliding window: max N connections per IP per WINDOW_SECS.
 const IP_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const IP_RATE_LIMIT_MAX_CONNS: usize = 20;
+/// Максимум отслеживаемых IP-адресов (защита от memory exhaustion).
+/// При превышении — LRU eviction самых старых записей.
+const IP_RATE_LIMIT_MAX_ENTRIES: usize = 10000;
 
 struct IpRateLimiter {
     connections: Mutex<HashMap<IpAddr, Vec<Instant>>>,
@@ -61,11 +64,28 @@ impl IpRateLimiter {
 
     /// Проверяет, может ли IP установить новое соединение.
     /// Возвращает true если разрешено, false если превышен лимит.
+    /// При превышении MAX_ENTRIES — удаляет самые старые записи (LRU).
     async fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let window = Duration::from_secs(IP_RATE_LIMIT_WINDOW_SECS);
 
         let mut conns = self.connections.lock().await;
+
+        // LRU eviction: если слишком много записей, удаляем самые старые
+        if conns.len() > IP_RATE_LIMIT_MAX_ENTRIES {
+            // Собираем (ip, oldest_timestamp) и сортируем
+            let mut ip_oldest: Vec<(IpAddr, Instant)> = conns
+                .iter()
+                .filter_map(|(ip, ts)| ts.first().map(|t| (*ip, *t)))
+                .collect();
+            ip_oldest.sort_by_key(|(_, t)| *t);
+            // Удаляем 20% самых старых
+            let to_remove = ip_oldest.len() / 5;
+            for (ip, _) in ip_oldest.into_iter().take(to_remove) {
+                conns.remove(&ip);
+            }
+        }
+
         let entry = conns.entry(ip).or_insert_with(Vec::new);
         entry.retain(|t| now.duration_since(*t) < window);
 

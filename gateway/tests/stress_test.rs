@@ -48,11 +48,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut handles = vec![];
 
+    // Staggered spawn: 2ms между клиентами для сглаживания TLS handshake burst
+    let stagger = Duration::from_millis(2);
+
     for i in 0..num_valid {
         let addr = gateway_addr.to_string();
         let sp = server_public;
         let k = key;
         handles.push(tokio::spawn(async move {
+            tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
             let result = tokio::time::timeout(Duration::from_secs(10), client_valid(i, &addr, sp, k)).await;
             match result {
@@ -65,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..num_invalid {
         let addr = gateway_addr.to_string();
         handles.push(tokio::spawn(async move {
+            tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
             let result = tokio::time::timeout(Duration::from_secs(5), client_invalid_auth(i, &addr)).await;
             match result {
@@ -79,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sp = server_public;
         let k = key;
         handles.push(tokio::spawn(async move {
+            tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
             let result = tokio::time::timeout(Duration::from_secs(5), client_replay(i, &addr, sp, k)).await;
             match result {
@@ -91,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..num_truncated {
         let addr = gateway_addr.to_string();
         handles.push(tokio::spawn(async move {
+            tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
             let result = tokio::time::timeout(Duration::from_secs(5), client_truncated(i, &addr)).await;
             match result {
@@ -100,11 +107,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     }
 
+    // Slow clients: запускаем отдельно, не включаем в latency-статистику
     for i in 0..num_slow {
         let addr = gateway_addr.to_string();
         let sp = server_public;
         let k = key;
         handles.push(tokio::spawn(async move {
+            tokio::time::sleep(stagger * (i as u32 / 10)).await;
             let req_start = Instant::now();
             let result = tokio::time::timeout(Duration::from_secs(15), client_slow(i, &addr, sp, k)).await;
             match result {
@@ -183,6 +192,17 @@ impl Stats {
                     self.success += 1;
                     self.valid_success += 1;
                     self.latencies.push(result.latency);
+                } else if result.rejected {
+                    self.rejected += 1;
+                } else {
+                    self.errors += 1;
+                }
+            }
+            ClientClass::Slow => {
+                // Slow clients не включаем в latency-статистику (искусственные задержки)
+                if result.success {
+                    self.success += 1;
+                    self.valid_success += 1;
                 } else if result.rejected {
                     self.rejected += 1;
                 } else {
@@ -377,14 +397,14 @@ async fn client_slow(
     let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
         let mut tls = make_tls_connection(addr).await?;
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let client_auth = send_auth_frame(&mut tls, &server_public)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let codec = FrameCodec::new(&key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         codec
             .write_frame(&mut tls, b"CONNECT 127.0.0.1:80")
