@@ -1,0 +1,35 @@
+﻿# Security Review â Phase 2 Isolated Browser Gateway
+
+## (a) ECDHE PFS design
+**Concern:** `auth_token = HKDF(X25519(client_eph, server_static), "auth")` â client authenticates the *server* via its static key, but what authenticates the *client* to the server? If this token is the only clientâserver auth, and server_static is a fixed long-term key, any party who ever observed one valid auth flow (or has server_static, e.g. leaked) could impersonate. Need confirmation: is there a separate pre-shared client credential feeding into this token, or is auth_token solely derived from DH with server static (i.e., anyone can compute it if they know server's public key, which is likely public)? If server_static's public component is public knowledge (it must be, for clients to do DH), then `X25519(client_eph, server_static)` is computable by **anyone**, since client_eph is chosen by the connecting party. This means auth_token as described provides **no client authentication** â it only proves the client knows the server's static public key, which is not a secret. This looks like it authenticates server identity to client (implicitly, via correct session derivation), not client to server. If that's the intent (server is the "hidden" party, clients are anonymous-but-rate-limited), fine â but must be explicitly stated in threat model as "no client authentication, Sybil-resistance via IP rate limiting only." **Please confirm this is intentional and documented**, otherwise this is a design gap, not a bug.
+
+Ephemeral zeroization + fresh-per-connection server ephemeral is correct for PFS. Good.
+
+## (b) Rekey overlap protocol
+Design is sound: dual-key acceptance window, monotonic kid ordering prevents downgrade, auto-complete bounds prev-key lifetime (256 frames). One gap: what happens if REKEY_ACK is lost/delayed indefinitely and 256-frame auto-complete fires on one side but not synchronized on the other (server completes but client still sending under old key, or vice versa)? Auto-complete is presumably per-endpoint and independent â need to confirm both sides converge without a stall/desync causing legitimate frames to be dropped as "downgrade." Test coverage (`auto_complete`) suggests single-sided behavior tested, not cross-endpoint desync under packet loss. **Minor gap**, not blocking.
+
+## (c) Failover cooldown
+60s min interval + timeout-only trigger (not error-triggered) is a reasonable anti-fingerprinting choice. Deterministic priority list is fine for known-endpoint scenarios but gives an active adversary who forces timeouts a predictable switch pattern â acceptable given documented residual risk, not a blocker.
+
+## Critical gaps
+1. **Client authentication ambiguity (above)** â must be clarified/documented before prod, since it affects whether the gateway is Sybil-open by design (mitigated only by IP rate limiting, which is itself LRU-bounded and bypassable via IP rotation).
+2. **Stress test latency (p50=714ms, p99=1.14s)** on 2-core VPS for ECDHE handshake is high â under real DPI/censorship conditions with concurrent load this may cause timeouts triggering failover storms. Needs realistic multi-core benchmarking (ties into #12).
+3. **Origin IP protection** is "documented as residual risk" not mitigated â acceptable only if threat model explicitly scopes this out for target adversary (state censor sees gateway IP regardless of steal-TLS).
+4. No mention of key-rotation/compromise recovery for the **server static key** itself (used in auth_token derivation) â if that leaks, what's the revocation path? Should be in threat model's incident response section â confirm it's covered.
+
+## #12 Scale test (10k+ WAN)
+**Not a hard blocker for initial limited production/beta**, given: soak test clean (32k conns, no leaks), fuzzing clean (71k runs), unit coverage solid. But it **should gate wider rollout** â defer to Phase 3 only if launch is soft/limited-userbase with active monitoring (Prometheus is in place, good) and a kill-switch/rollback plan. For a public release marketed to at-risk users under active censorship, 10k+ concurrent WAN validation is important before trusting it at scale.
+
+---
+
+## Verdict: **CONDITIONAL APPROVE**
+
+**Readiness: ~72%** (up from 45%)
+
+**Conditions before full production:**
+1. Clarify & document client-authentication model explicitly (Sybil resistance = IP rate limit only, or add real client auth).
+2. Confirm rekey cross-endpoint desync behavior under loss (add integration test).
+3. Run failover/handshake load test with realistic concurrency before public launch (can be soft-launch gated, not necessarily full #12 WAN scale first).
+4. Add server-static-key compromise/rotation procedure to threat model.
+
+#12 may defer to Phase 3 **only** for a limited/monitored rollout, not full public release.
