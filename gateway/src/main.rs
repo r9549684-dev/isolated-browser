@@ -38,6 +38,7 @@ use transport_core::error::TransportError;
 
 mod auth;
 mod promo;
+mod metrics;
 use auth::{AuthManager, Claims};
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 5000;
@@ -239,6 +240,9 @@ struct Args {
     #[arg(long, env = "HMAC_KEY", help = "Hex-encoded HMAC key for data signing")]
     hmac_key: String,
 
+    #[arg(long, default_value = "0.0.0.0:9090", help = "Prometheus metrics endpoint")]
+    metrics_bind: SocketAddr,
+
     #[arg(long, help = "Test mode: accept any subscription token")]
     test_mode: bool,
 }
@@ -300,6 +304,27 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Prometheus metrics endpoint
+    let metrics_addr = args.metrics_bind;
+    tokio::spawn(async move {
+        let listener = TcpListener::bind(metrics_addr).await.expect("metrics bind failed");
+        info!("metrics endpoint listening on {}", metrics_addr);
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let body = metrics::render();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
     loop {
         let (tcp, peer) = listener.accept().await?;
 
@@ -329,6 +354,8 @@ async fn main() -> anyhow::Result<()> {
         let fallback = fallback_cdn.clone();
         let sub_mgr = subscription_manager.clone();
         let test = test_mode;
+        metrics::inc_connections_active();
+        metrics::inc_connections_total();
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(e) =
@@ -336,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 debug!("client {} error: {:?}", peer, e);
             }
+            metrics::dec_connections_active();
         });
     }
 }
@@ -404,6 +432,7 @@ async fn handle_tcp_connection(
                         }
                         None => {
                             send_unified_error_tls(&mut tls_stream).await;
+                            metrics::inc_auth_failure("invalid");
                             return Err(TransportError::AuthFailed);
                         }
                     }
@@ -444,6 +473,7 @@ async fn handle_tcp_connection(
                             }
                             None => {
                                 send_unified_error_tls(&mut tls_stream).await;
+                                metrics::inc_auth_failure("invalid");
                                 return Err(TransportError::AuthFailed);
                             }
                         }
@@ -591,6 +621,7 @@ async fn relay(
                     }
                     Ok(Err(TransportError::ReplayDetected(c))) => {
                         warn!("replay detected: counter {}", c);
+                        metrics::inc_replay_detected();
                         return Ok(());
                     }
                     Ok(Err(TransportError::RekeyNeeded(c, threshold))) => {
@@ -602,6 +633,7 @@ async fn relay(
                                 match server_handle_rekey_ack(&codec, &mut gateway_side, new_kid, &new_key).await {
                                     Ok(()) => {
                                         info!("rekey completed: new kid={}", new_kid);
+                                        metrics::inc_rekey();
                                         continue;
                                     }
                                     Err(e) => {
