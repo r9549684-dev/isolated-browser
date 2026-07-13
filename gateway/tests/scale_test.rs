@@ -76,7 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         succ.fetch_add(1, Ordering::Relaxed);
                         lats.lock().await.push(elapsed);
                     }
-                    _ => fail.fetch_add(1, Ordering::Relaxed),
+                    Ok(Err(_e)) => {
+                        fail.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        fail.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }));
         }
