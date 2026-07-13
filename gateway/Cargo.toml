@@ -41,3 +41,7 @@ harness = false
 [[test]]
 name = "soak_test"
 harness = false
+
+[[test]]
+name = "scale_test"
+harness = false
