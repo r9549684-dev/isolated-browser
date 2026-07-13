@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod error;
+pub mod failover;
 pub mod protocol;
 pub mod proxy;
 pub mod rate_limiter;

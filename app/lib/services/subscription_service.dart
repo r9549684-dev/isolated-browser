@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/subscription.dart';
 
 class SubscriptionService {
@@ -7,6 +8,13 @@ class SubscriptionService {
   static const String _userIdKey = 'user_id';
   static const String _trialStartedKey = 'trial_started_at';
   static const String _jwtTokenKey = 'jwt_token';
+
+  // Secure storage для JWT — шифрование at rest (Keystore Android, Keychain iOS).
+  // SharedPreferences хранит plaintext, что небезопасно для токенов.
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+  );
 
   String? _userId;
   Subscription? _currentSubscription;
@@ -28,7 +36,8 @@ class SubscriptionService {
       );
     }
 
-    _jwtToken = prefs.getString(_jwtTokenKey);
+    // JWT из secure storage (не из SharedPreferences).
+    _jwtToken = await _secureStorage.read(key: _jwtTokenKey);
 
     if (_currentSubscription == null) {
       await _startTrialIfNeeded();
@@ -60,8 +69,8 @@ class SubscriptionService {
     final body = base64Url.encode(utf8.encode(json.encode(payload)));
     _jwtToken = '$header.$body.test_signature';
     
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_jwtTokenKey, _jwtToken!);
+    // Сохраняем в secure storage (шифрование at rest).
+    await _secureStorage.write(key: _jwtTokenKey, value: _jwtToken!);
   }
 
   String? get jwtToken => _jwtToken;
@@ -219,6 +228,7 @@ class SubscriptionService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_subscriptionKey);
     await prefs.remove(_trialStartedKey);
+    await _secureStorage.delete(key: _jwtTokenKey);
     _currentSubscription = null;
     await _startTrialIfNeeded();
   }

@@ -24,6 +24,9 @@ dependencies:
   # Хранение настроек (gateway host, key)
   shared_preferences: ^2.3.2
 
+  # Безопасное хранение JWT (Keystore/Keychain)
+  flutter_secure_storage: ^9.2.2
+
   # Логи
   logging: ^1.3.0
 

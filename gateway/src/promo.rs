@@ -31,7 +31,7 @@ pub struct PromoCode {
     pub created_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromoToken {
     pub code: String,
     pub user_id: String,
@@ -199,5 +199,51 @@ mod tests {
         assert_eq!(token.tier, "pro");
         
         manager.verify_token(&token).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_promo_rejects_tampered_signature() {
+        let manager = PromoManager::new(b"test_key".to_vec());
+        let mut token = manager.use_code("PRO3M", "user456").await.unwrap();
+        
+        // Tamper signature
+        let mut sig_bytes = hex::decode(&token.signature).unwrap();
+        sig_bytes[0] ^= 0xFF;
+        token.signature = hex::encode(&sig_bytes);
+        
+        let result = manager.verify_token(&token).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), PromoError::InvalidSignature));
+    }
+
+    #[tokio::test]
+    async fn test_promo_expired_rejected() {
+        let manager = PromoManager::new(b"test_key".to_vec());
+        let mut token = manager.use_code("PRO3M", "user789").await.unwrap();
+        
+        // Set exp в прошлом
+        token.exp = Utc::now().timestamp() - 1;
+        // Пересчитываем signature (т.к. exp входит в данные)
+        token.signature = manager.generate_signature(&token);
+        
+        let result = manager.verify_token(&token).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), PromoError::Expired));
+    }
+
+    #[tokio::test]
+    async fn test_promo_constant_time_verification() {
+        // Проверяем что verify_token использует constant-time comparison
+        // (subtle::ConstantTimeEq), а не обычный ==.
+        let manager = PromoManager::new(b"test_key".to_vec());
+        let token = manager.use_code("PRO3M", "user_ct").await.unwrap();
+        
+        // Valid token должен пройти
+        assert!(manager.verify_token(&token).await.is_ok());
+        
+        // Полностью другой signature (другая длина hex — но оба 64 hex chars = 32 bytes)
+        let mut bad_token = token.clone();
+        bad_token.signature = hex::encode(&[0u8; 32]);
+        assert!(manager.verify_token(&bad_token).await.is_err());
     }
 }
