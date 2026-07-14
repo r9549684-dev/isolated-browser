@@ -212,9 +212,11 @@ pub async fn send_rekey_init<W: AsyncWrite + Unpin>(
     codec.write_frame(writer, &payload).await
 }
 
-/// Клиент читает REKEY_INIT, применяет rekey, отправляет REKEY_ACK.
+/// Клиент читает REKEY_INIT, отправляет REKEY_ACK (под OLD ключом), затем применяет rekey.
 /// Формат REKEY_INIT plaintext: REKEY_INIT_MAGIC(6) + new_kid(1) + new_key(32).
 /// Формат REKEY_ACK plaintext: REKEY_ACK_MAGIC(9) + new_kid(1).
+///
+/// Важно: ACK отправляется ДО start_rekey (под old key), т.к. сервер ещё не сделал rekey.
 pub async fn client_handle_rekey<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     codec: &FrameCodec,
     reader: &mut R,
@@ -231,12 +233,14 @@ pub async fn client_handle_rekey<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let mut new_key = [0u8; 32];
     new_key.copy_from_slice(&frame[REKEY_INIT_MAGIC.len() + 1..REKEY_INIT_MAGIC.len() + 1 + 32]);
 
-    codec.start_rekey(new_kid, &new_key);
-
+    // ACK под OLD ключом (до start_rekey).
     let mut ack = Vec::with_capacity(REKEY_ACK_MAGIC.len() + 1);
     ack.extend_from_slice(REKEY_ACK_MAGIC);
     ack.push(new_kid);
     codec.write_frame(writer, &ack).await?;
+
+    // Теперь применяем rekey (overlap window активен).
+    codec.start_rekey(new_kid, &new_key);
 
     Ok((new_kid, new_key))
 }

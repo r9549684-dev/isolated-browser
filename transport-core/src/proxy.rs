@@ -236,7 +236,8 @@ async fn relay(
                         {
                             debug!("received REKEY_INIT from gateway — performing rekey");
                             // REKEY_INIT уже прочитан. Извлекаем new_kid + new_key,
-                            // отправляем REKEY_ACK, применяем rekey.
+                            // отправляем REKEY_ACK (под OLD ключом, до start_rekey!),
+                            // затем применяем rekey.
                             let magic_len = crate::protocol::REKEY_INIT_MAGIC.len();
                             if data.len() < magic_len + 1 + 32 {
                                 return Err(TransportError::Protocol("REKEY_INIT too short".into()));
@@ -245,12 +246,14 @@ async fn relay(
                             let mut new_key = [0u8; 32];
                             new_key.copy_from_slice(&data[magic_len + 1..magic_len + 1 + 32]);
 
-                            codec.start_rekey(new_kid, &new_key);
-
+                            // Отправляем ACK под OLD ключом (сервер ещё не сделал rekey).
                             let mut ack = Vec::with_capacity(crate::protocol::REKEY_ACK_MAGIC.len() + 1);
                             ack.extend_from_slice(crate::protocol::REKEY_ACK_MAGIC);
                             ack.push(new_kid);
                             codec.write_frame(&mut gateway, &ack).await?;
+
+                            // Теперь применяем rekey (overlap window активен).
+                            codec.start_rekey(new_kid, &new_key);
                             debug!("rekey completed on client side: kid={}", new_kid);
                             continue;
                         }

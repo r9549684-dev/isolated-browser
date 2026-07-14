@@ -133,6 +133,23 @@ Isolated Browser — система для обхода DPI-блокировок
 - Constant-time comparison (no timing side-channel)
 - Server generates fresh ephemeral per-connection (PFS)
 
+#### 3.3.1 Client Authentication Model (reviewer concern)
+**Важно:** auth_token НЕ аутентифицирует клиента — он только доказывает, что клиент
+знает server_static_public (который сам по себе не секрет, т.к. нужен клиентам для DH).
+
+**Это намеренно:** gateway — "hidden" party, клиенты анонимны. Аутентификация
+клиента к серверу НЕ предусмотрена протоколом. Защита от Sybil-атак
+(mass connection flooding) обеспечивается только:
+- Per-IP rate limiting (20 conn/min per IP, LRU cap=10000)
+- Connection semaphore (max 5000 concurrent)
+- Subscription JWT validation (post-TLS, для access control, не для auth)
+
+**Sybil resistance = IP rate limiting only.** Атакующий с IP rotation
+(many IPs) может обойти rate limiting. Это задокументированное ограничение.
+
+**Future (Phase 3):** добавить pre-shared client credentials или подписанную
+client identity в auth_token для real client authentication.
+
 ### 3.4 Replay Protection
 - Sliding window (64 frames) per-session
 - Counter-based nonce (u32, monotonic)
@@ -223,3 +240,26 @@ Isolated Browser — система для обхода DPI-блокировок
 ### Resource exhaustion
 - Monitor: `gateway_connections_active` near 5000
 - Action: scale horizontally or raise semaphore
+
+### 7.1 Server Static Key Compromise / Rotation Procedure
+**Угроза:** утечка server_static_secret (X25519 long-term key).
+- НЕ раскрывает прошлые сессии (PFS: ephemeral keys destroyed per-connection).
+- РАСКРЫВАЕТ ability to compute auth_token для NEW connections → любой может
+  подключаться (пока не rotation).
+- НЕ раскрывает session keys ongoing сессий (ECDHE ephemeral).
+
+**Rotation procedure:**
+1. Генерировать новый server_static_secret (X25519).
+2. Обновить конфиг gateway (--server-private-key).
+3. Перезапустить gateway (downtime ~1s, существующие сессии разрываются).
+4. Распространить новый server_public всем клиентам (config update / OTA).
+5. Старый public key — отозвать (clients reject after update).
+
+**Note:** Online rotation (zero-downtime) НЕ поддерживается — server_static
+зашит в config. Phase 3: hot-reload server_static без restart.
+
+### 7.2 Scale Limits (2-core VPS)
+- Max concurrent (≥95% success): **1000** (2-core Xeon @ 3.00GHz)
+- 2000 concurrent: 50.8% success (CPU-bound TLS handshake)
+- 3000 concurrent: 33.8% success
+- Для >1000 concurrent: требуется 4+ core VPS (Phase 3: scale test 10k+ WAN)
