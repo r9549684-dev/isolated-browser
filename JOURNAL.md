@@ -983,7 +983,89 @@ SOCKS Port: 18080
 
 ## Шаблон записи
 
-### YYYY-MM-DD — Краткое описание
+### 2026-07-13 — Phase 2 Production Readiness + Ревизия
+
+**Статус:** Выполнено. CONDITIONAL APPROVE от ревизора, ~72% readiness (с 45%).
+
+### Реализовано (Phase 2 — 12 задач)
+
+#### #1 Forward Secrecy (ECDHE per session) — steal.rs
+- `client_handshake()`: X25519 ephemeral client, auth_token=HKDF(DH(client_eph, server_static), "auth"), sends 80B frame, reads 32B server_ephemeral_public, derives session_key=HKDF(DH(client_eph, server_eph), "session").
+- `server_derive_session()`: verifies auth_token constant-time, generates FRESH server ephemeral per-connection → PFS. HKDF label separation (AUTH_INFO vs SESSION_INFO).
+- 5 PFS tests. Stress: 850/850 valid, 0 errors.
+
+#### #2 Completed Rekey Handshake — protocol.rs + steal.rs
+- FrameCodec rewritten: `RwLock<CodecState>` (cipher, kid, prev, frames_since_rekey). No unsafe.
+- `start_rekey`/`complete_rekey`/`is_rekey_overlap`. Overlap window REKEY_OVERLAP_FRAMES=256, auto-complete.
+- Control frames: REKEY_INIT_MAGIC(6)+new_kid(1)+new_key(32), REKEY_ACK_MAGIC(9)+new_kid(1).
+- Downgrade protection: kid monotonic (active or prev only).
+- gateway relay: RekeyNeeded → send_rekey_init → server_handle_rekey_ack → continue.
+- 5 rekey tests + 3 desync tests.
+
+#### #3 Fuzzing — transport-core/fuzz/ (cargo-fuzz, nightly)
+- 3 targets: fuzz_read_frame (18777 runs), fuzz_write_frame (18241), fuzz_handshake (34010).
+- Total: 71028 runs, 0 crashes, coverage 1206.
+
+#### #4 Soak Test — gateway/tests/soak_test.rs
+- 5 min, 20 concurrent, 32540 connections, 0 failures. Gateway RSS=25.4MB, FD=10, threads=3 (no leaks).
+
+#### #5 Observability — gateway/src/metrics.rs
+- Prometheus /metrics on :9090. Counters: connections_active/total, auth_failures{type}, rekey_total, replay_detected. Summary: handshake_latency (p50/p95/p99).
+
+#### #6 Adversarial Test — gateway/src/main.rs adversarial_tests
+- 50000 IPs bounded (LRU cap=10000), blocks_excess (20/IP → 21st rejected).
+
+#### #7 Threat Model — docs/THREAT_MODEL.md
+- 7 sections: 5 attacker types, guarantees, limitations, crypto, checklist, incident response.
+
+#### #8 Secure Storage JWT — app/lib/services/subscription_service.dart
+- flutter_secure_storage (Keystore/Keychain) для JWT, не plaintext SharedPreferences.
+
+#### #9 Multi-Endpoint Failover — transport-core/src/failover.rs
+- FailoverManager: deterministic priority list, 60s cooldown, timeout-only trigger. 6 tests.
+
+#### #10 Origin IP Protection — documented in THREAT_MODEL residual risks.
+
+#### #11 promo.rs Audit — gateway/src/promo.rs
+- ct_eq (constant-time) уже использовался. Добавлены 3 теста (tampered, expired, constant-time). PromoToken: Clone.
+
+#### #12 Scale Test — gateway/tests/scale_test.rs (best-effort 2-core)
+- 1000 conc: 100% success. 2000: 50.8%. 3000: 33.8%. Max 2-core=1000. Для >1000 нужен 4+ core.
+
+### Ревизор (anthropic/claude-sonnet-5, Amazon Bedrock)
+- **Verdict:** CONDITIONAL APPROVE
+- **Readiness:** ~72% (с ~45%)
+- **Cost:** $0.022 (бюджет $0.07)
+- **4 условия до production — ВСЕ ВЫПОЛНЕНЫ:**
+  1. Client-auth model clarified (THREAT_MODEL 3.3.1: Sybil=IP rate limit only)
+  2. Rekey cross-endpoint desync test (3 теста). **Найден и исправлен БАГ**: REKEY_ACK отправлялся под NEW key, но сервер ещё на old key → fixed (ACK under old key, then start_rekey).
+  3. Failover/handshake realistic load test: 200 clients, 100% success, p99=183ms.
+  4. Server-static-key compromise/rotation procedure (THREAT_MODEL 7.1).
+
+### Тесты (итог)
+- transport-core: 42 unit + 3 desync = 45
+- gateway: 12 unit + stress (850/850) + soak (32540/0) + scale + failover_load (200/200)
+- Fuzzing: 71028 runs, 0 crashes
+
+### Коммиты (branch wip-flutter)
+- 7189492 PFS ECDHE
+- d083f40 Rekey handshake
+- b82f110 Fuzzing
+- cee0854 Soak test
+- 4763558 Prometheus metrics
+- e63c958 Threat model + secure storage + failover + promo
+- 6477ac6 Reviewer Phase 2 result
+- cd5d099 Scale test
+- 282cd20 Rekey ACK bug fix + reviewer conditions 1,2,4
+- 38052fd Failover load test
+
+### Файлы
+- `reviewer_phase2_result.txt` — полный отзыв ревизора
+- `docs/THREAT_MODEL.md` — threat model (обновлён: 3.3.1, 7.1, 7.2)
+
+---
+
+## YYYY-MM-DD — Краткое описание
 
 **Действия:**
 - ...
