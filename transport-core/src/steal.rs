@@ -1,4 +1,4 @@
-/// Steal-oncall handshake with Forward Secrecy (ECDHE per session).
+/// Steal-oncall handshake with Forward Secrecy (ECDHE per session) + PSK.
 ///
 /// Архитектура:
 /// 1. Клиент подключается к gateway IP:443
@@ -6,16 +6,21 @@
 /// 3. Сервер завершает TLS handshake
 /// 4. После TLS клиент отправляет auth frame (80 байт):
 ///    - Ephemeral X25519 public key (32 bytes)
-///    - Auth token = HKDF(X25519(ephemeral_secret, server_static_public), "auth") (32 bytes)
+///    - Auth token = HKDF(X25519(ephemeral_secret, server_static) || client_psk, "auth") (32 bytes)
 ///    - c2s_prefix: nonce prefix для client→server (8 bytes)
 ///    - s2c_prefix: nonce prefix для server→client (8 bytes)
 /// 5. Сервер проверяет auth_token (constant-time):
 ///    - Вычисляет shared_secret = X25519(server_static_secret, client_ephemeral_public)
+///    - Вычисляет expected = HKDF(shared_secret || client_psk, "auth")
 ///    - Если token совпадает — генерирует fresh server ephemeral keypair
 ///    - Отправляет server_ephemeral_public (32 bytes) клиенту
 ///    - Если невалиден — закрывает соединение (unified error)
 /// 6. Обе стороны вычисляют session_key = HKDF(X25519(client_ephemeral, server_ephemeral), "session")
 /// 7. FrameCodec использует session_key для ChaCha20-Poly1305
+///
+/// PSK (Pre-Shared Key): 32-байтовый секрет, известный клиенту и серверу.
+/// Без PSK злоумышленник не может вычислить валидный auth_token даже
+/// при знании server_static_public. PSK НЕ передаётся по сети.
 ///
 /// Forward Secrecy: компрометация server_static_secret НЕ раскрывает прошлые
 /// сессии, т.к. server_ephemeral_secret уничтожается после каждого соединения.
@@ -58,31 +63,34 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.ct_eq(b).into()
 }
 
-/// Client-side ECDHE handshake с forward secrecy.
+/// Client-side ECDHE handshake с forward secrecy + PSK.
 ///
 /// Flow:
 /// 1. Generate ephemeral X25519 keypair
-/// 2. auth_token = HKDF(X25519(client_ephemeral, server_static_public), "auth")
+/// 2. auth_token = HKDF(X25519(client_ephemeral, server_static) || client_psk, "auth")
 /// 3. Send auth frame: ephemeral_public(32) + auth_token(32) + c2s_prefix(8) + s2c_prefix(8)
 /// 4. Read server ephemeral public (32 bytes)
 /// 5. session_key = HKDF(X25519(client_ephemeral, server_ephemeral), "session")
 ///
+/// PSK добавляется в derivation auth_token, но НЕ передаётся по сети.
 /// PFS: compromising server_static_secret does NOT reveal past sessions,
 /// because server_ephemeral_secret is destroyed after each connection.
 pub async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     server_static_public: &[u8; 32],
+    client_psk: &[u8; 32],
 ) -> Result<ClientAuth, TransportError> {
-    // Используем StaticSecret (а не EphemeralSecret) т.к. diffie_hellman(&self)
-    // заимствует, позволяя переиспользовать ключ для двух DH операций (auth + session).
-    // Ключ уничтожается (zeroized) при выходе из функции — PFS сохраняется.
     let client_secret = StaticSecret::random_from_rng(OsRng);
     let client_public = PublicKey::from(&client_secret);
 
     let server_static = PublicKey::from(*server_static_public);
-    let auth_shared = client_secret.diffie_hellman(&server_static);
+    let dh_shared = client_secret.diffie_hellman(&server_static);
+
+    let mut auth_input = [0u8; 64];
+    auth_input[..32].copy_from_slice(dh_shared.as_bytes());
+    auth_input[32..].copy_from_slice(client_psk);
     let mut auth_token = [0u8; AUTH_TOKEN_SIZE];
-    Hkdf::<Sha256>::new(None, auth_shared.as_bytes())
+    Hkdf::<Sha256>::new(None, &auth_input)
         .expand(AUTH_INFO, &mut auth_token)
         .expect("HKDF expand failed");
 
@@ -116,7 +124,10 @@ pub async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     })
 }
 
-/// Server-side ECDHE: verify auth_token + derive session key with fresh ephemeral.
+/// Server-side ECDHE + PSK: verify auth_token + derive session key with fresh ephemeral.
+///
+/// auth_token = HKDF(DH_shared || client_psk, "auth")
+/// Сервер должен знать client_psk для верификации.
 ///
 /// Возвращает Some((server_ephemeral_public, session_key)) если auth OK,
 /// None если auth failed. server_ephemeral_public (32 bytes) нужно отправить
@@ -128,13 +139,18 @@ pub fn server_derive_session(
     server_static_secret: &[u8; 32],
     client_ephemeral_public: &[u8; 32],
     received_auth_token: &[u8; 32],
+    client_psk: &[u8; 32],
 ) -> Option<([u8; 32], [u8; 32])> {
     let server_static = StaticSecret::from(*server_static_secret);
     let client_pub = PublicKey::from(*client_ephemeral_public);
-    let auth_shared = server_static.diffie_hellman(&client_pub);
+    let dh_shared = server_static.diffie_hellman(&client_pub);
+
+    let mut auth_input = [0u8; 64];
+    auth_input[..32].copy_from_slice(dh_shared.as_bytes());
+    auth_input[32..].copy_from_slice(client_psk);
 
     let mut expected_token = [0u8; AUTH_TOKEN_SIZE];
-    Hkdf::<Sha256>::new(None, auth_shared.as_bytes())
+    Hkdf::<Sha256>::new(None, &auth_input)
         .expand(AUTH_INFO, &mut expected_token)
         .expect("HKDF expand failed");
 
@@ -177,14 +193,15 @@ pub async fn read_auth_frame<S: AsyncRead + Unpin>(
     Ok((ephemeral_public, auth_token, c2s_prefix, s2c_prefix))
 }
 
-/// Устанавливает сессию с gateway: TLS handshake + ECDHE + FrameCodec.
+/// Устанавливает сессию с gateway: TLS handshake + ECDHE + PSK + FrameCodec.
 /// Используется клиентом (proxy.rs) и stress test.
 pub async fn establish_session(
     tls_stream: &mut TlsStream<TcpStream>,
     server_public: &[u8; 32],
     kid: u8,
+    client_psk: &[u8; 32],
 ) -> Result<FrameCodec, TransportError> {
-    let client_auth = client_handshake(tls_stream, server_public).await?;
+    let client_auth = client_handshake(tls_stream, server_public, client_psk).await?;
 
     let codec = FrameCodec::new(
         &client_auth.session_key,
@@ -287,10 +304,14 @@ mod tests {
         let server_keypair = AuthKeyPair::generate();
         let client_secret = StaticSecret::random_from_rng(OsRng);
         let client_public = PublicKey::from(&client_secret);
+        let test_psk = [0u8; 32];
 
-        let auth_shared = client_secret.diffie_hellman(&server_keypair.public);
+        let dh_shared = client_secret.diffie_hellman(&server_keypair.public);
+        let mut auth_input = [0u8; 64];
+        auth_input[..32].copy_from_slice(dh_shared.as_bytes());
+        auth_input[32..].copy_from_slice(&test_psk);
         let mut auth_token = [0u8; AUTH_TOKEN_SIZE];
-        Hkdf::<Sha256>::new(None, auth_shared.as_bytes())
+        Hkdf::<Sha256>::new(None, &auth_input)
             .expand(AUTH_INFO, &mut auth_token)
             .expect("HKDF expand failed");
 
@@ -298,6 +319,7 @@ mod tests {
             server_keypair.secret.as_bytes(),
             client_public.as_bytes(),
             &auth_token,
+            &test_psk,
         );
         let (server_ephemeral_public, server_session_key) = result.expect("auth should succeed");
 
@@ -314,15 +336,19 @@ mod tests {
     #[test]
     fn test_different_sessions_different_keys() {
         let server_keypair = AuthKeyPair::generate();
+        let test_psk = [0u8; 32];
 
         let mut keys = Vec::new();
         for _ in 0..3 {
             let client_secret = StaticSecret::random_from_rng(OsRng);
             let client_public = PublicKey::from(&client_secret);
 
-            let auth_shared = client_secret.diffie_hellman(&server_keypair.public);
+            let dh_shared = client_secret.diffie_hellman(&server_keypair.public);
+            let mut auth_input = [0u8; 64];
+            auth_input[..32].copy_from_slice(dh_shared.as_bytes());
+            auth_input[32..].copy_from_slice(&test_psk);
             let mut auth_token = [0u8; AUTH_TOKEN_SIZE];
-            Hkdf::<Sha256>::new(None, auth_shared.as_bytes())
+            Hkdf::<Sha256>::new(None, &auth_input)
                 .expand(AUTH_INFO, &mut auth_token)
                 .expect("HKDF expand failed");
 
@@ -330,6 +356,7 @@ mod tests {
                 server_keypair.secret.as_bytes(),
                 client_public.as_bytes(),
                 &auth_token,
+                &test_psk,
             )
             .expect("auth should succeed");
 
@@ -346,6 +373,7 @@ mod tests {
         let server_keypair = AuthKeyPair::generate();
         let client_secret = StaticSecret::random_from_rng(OsRng);
         let client_public = PublicKey::from(&client_secret);
+        let test_psk = [0u8; 32];
 
         let bad_token = [0xFFu8; 32];
 
@@ -353,6 +381,7 @@ mod tests {
             server_keypair.secret.as_bytes(),
             client_public.as_bytes(),
             &bad_token,
+            &test_psk,
         );
 
         assert!(result.is_none());
@@ -363,10 +392,14 @@ mod tests {
         let server_keypair = AuthKeyPair::generate();
         let client_secret = StaticSecret::random_from_rng(OsRng);
         let client_public = PublicKey::from(&client_secret);
+        let test_psk = [0u8; 32];
 
-        let auth_shared = client_secret.diffie_hellman(&server_keypair.public);
+        let dh_shared = client_secret.diffie_hellman(&server_keypair.public);
+        let mut auth_input = [0u8; 64];
+        auth_input[..32].copy_from_slice(dh_shared.as_bytes());
+        auth_input[32..].copy_from_slice(&test_psk);
         let mut auth_token = [0u8; AUTH_TOKEN_SIZE];
-        Hkdf::<Sha256>::new(None, auth_shared.as_bytes())
+        Hkdf::<Sha256>::new(None, &auth_input)
             .expand(AUTH_INFO, &mut auth_token)
             .expect("HKDF expand failed");
 
@@ -374,6 +407,7 @@ mod tests {
             server_keypair.secret.as_bytes(),
             client_public.as_bytes(),
             &auth_token,
+            &test_psk,
         )
         .expect("auth should succeed");
 
@@ -395,17 +429,17 @@ mod tests {
         let server_keypair = AuthKeyPair::generate();
         let server_secret = *server_keypair.secret.as_bytes();
         let server_public = *server_keypair.public.as_bytes();
+        let test_psk = [0u8; 32];
 
-        // Один duplex: client и server стороны читают/пишут друг другу.
         let (mut client_stream, mut server_stream) = tokio::io::duplex(4096);
 
         let client_handle = tokio::spawn(async move {
-            client_handshake(&mut client_stream, &server_public).await
+            client_handshake(&mut client_stream, &server_public, &test_psk).await
         });
 
         let server_handle = tokio::spawn(async move {
             let (ephemeral, token, _c2s, _s2c) = read_auth_frame(&mut server_stream).await?;
-            match server_derive_session(&server_secret, &ephemeral, &token) {
+            match server_derive_session(&server_secret, &ephemeral, &token, &test_psk) {
                 Some((server_eph_pub, session_key)) => {
                     server_stream.write_all(&server_eph_pub).await?;
                     server_stream.flush().await?;
@@ -420,5 +454,31 @@ mod tests {
         let server_session_key = server_result.expect("auth should succeed");
 
         assert_eq!(client_auth.session_key, server_session_key);
+    }
+
+    #[test]
+    fn test_wrong_psk_rejected() {
+        let server_keypair = AuthKeyPair::generate();
+        let client_secret = StaticSecret::random_from_rng(OsRng);
+        let client_public = PublicKey::from(&client_secret);
+        let client_psk = [1u8; 32];
+        let server_psk = [2u8; 32];
+
+        let dh_shared = client_secret.diffie_hellman(&server_keypair.public);
+        let mut auth_input = [0u8; 64];
+        auth_input[..32].copy_from_slice(dh_shared.as_bytes());
+        auth_input[32..].copy_from_slice(&client_psk);
+        let mut auth_token = [0u8; AUTH_TOKEN_SIZE];
+        Hkdf::<Sha256>::new(None, &auth_input)
+            .expand(AUTH_INFO, &mut auth_token)
+            .expect("HKDF expand failed");
+
+        let result = server_derive_session(
+            server_keypair.secret.as_bytes(),
+            client_public.as_bytes(),
+            &auth_token,
+            &server_psk,
+        );
+        assert!(result.is_none(), "wrong PSK should be rejected");
     }
 }

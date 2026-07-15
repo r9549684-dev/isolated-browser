@@ -36,6 +36,7 @@ pub struct Socks5Proxy {
     key: [u8; 32],
     sni_pool: Vec<String>,
     server_public: [u8; 32],
+    client_psk: [u8; 32],
     rate_limiter: Option<Arc<RateLimiter>>,
 }
 
@@ -47,6 +48,7 @@ impl Socks5Proxy {
         key: [u8; 32],
         sni_pool: Vec<String>,
         server_public: [u8; 32],
+        client_psk: [u8; 32],
     ) -> Self {
         Self {
             bind_addr,
@@ -55,6 +57,7 @@ impl Socks5Proxy {
             key,
             sni_pool,
             server_public,
+            client_psk,
             rate_limiter: None,
         }
     }
@@ -74,6 +77,7 @@ impl Socks5Proxy {
         let gateway_port = self.gateway_port;
         let sni_pool = self.sni_pool;
         let server_public = self.server_public;
+        let client_psk = self.client_psk;
         let rate_limiter = self.rate_limiter;
 
         loop {
@@ -85,7 +89,7 @@ impl Socks5Proxy {
             let rl = rate_limiter.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_connection(client, &gw_host, gateway_port, sni, server_public, rl).await
+                    handle_connection(client, &gw_host, gateway_port, sni, server_public, client_psk, rl).await
                 {
                     warn!("connection {} error: {}", peer, e);
                 }
@@ -100,9 +104,9 @@ async fn handle_connection(
     gateway_port: u16,
     sni_pool: Vec<String>,
     server_public: [u8; 32],
+    client_psk: [u8; 32],
     rate_limiter: Option<Arc<RateLimiter>>,
 ) -> Result<(), TransportError> {
-    // ── 1. SOCKS5 handshake ───────────────────────────────────────────────
     let mut header = [0u8; 2];
     client.read_exact(&mut header).await?;
 
@@ -120,7 +124,6 @@ async fn handle_connection(
     }
     client.write_all(&[SOCKS_VERSION, NO_AUTH]).await?;
 
-    // ── 2. SOCKS5 request ────────────────────────────────────────────────
     let mut req = [0u8; 4];
     client.read_exact(&mut req).await?;
 
@@ -164,12 +167,10 @@ async fn handle_connection(
 
     debug!("CONNECT {}:{}", target_host, target_port);
 
-    // ── 3. Подключаемся к gateway поверх TLS ────────────────────────────
     let mut tls_client = TlsClient::new(sni_pool)?;
     let mut tls_stream = tls_client.connect(gateway_host, gateway_port).await?;
 
-    // ── 4. ECDHE handshake (forward secrecy) ───────────────────────────
-    let client_auth = crate::steal::client_handshake(&mut tls_stream, &server_public).await?;
+    let client_auth = crate::steal::client_handshake(&mut tls_stream, &server_public, &client_psk).await?;
 
     let codec = FrameCodec::new(&client_auth.session_key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 

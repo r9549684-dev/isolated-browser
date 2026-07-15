@@ -18,6 +18,14 @@ const TEST_MODE_SERVER_SECRET: [u8; 32] = [
     0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 ];
 
+/// Pre-shared key клиента (должен совпадать с gateway::TEST_MODE_CLIENT_PSK).
+const TEST_MODE_CLIENT_PSK: [u8; 32] = [
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+];
+
 /// Вычисляет server public key из TEST_MODE_SERVER_SECRET.
 fn server_public() -> [u8; 32] {
     use x25519_dalek::{PublicKey, StaticSecret};
@@ -277,7 +285,7 @@ async fn client_valid(
     let req_start = Instant::now();
     let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
         let mut tls = make_tls_connection(addr).await?;
-        let client_auth = client_handshake(&mut tls, &server_public)
+        let client_auth = client_handshake(&mut tls, &server_public, &TEST_MODE_CLIENT_PSK)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
@@ -350,7 +358,7 @@ async fn client_replay(
 ) -> Result<ClientResult, Box<dyn std::error::Error + Send + Sync>> {
     let req_start = Instant::now();
     let mut tls = make_tls_connection(addr).await?;
-    let client_auth = client_handshake(&mut tls, &server_public).await?;
+    let client_auth = client_handshake(&mut tls, &server_public, &TEST_MODE_CLIENT_PSK).await?;
     let codec = FrameCodec::new(&client_auth.session_key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);
 
     // Пишем фрейм и сохраняем сырые байты
@@ -411,7 +419,7 @@ async fn client_slow(
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client_auth = client_handshake(&mut tls, &server_public)
+        let client_auth = client_handshake(&mut tls, &server_public, &TEST_MODE_CLIENT_PSK)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let codec = FrameCodec::new(&client_auth.session_key, client_auth.c2s_prefix, client_auth.s2c_prefix, 0);

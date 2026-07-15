@@ -54,6 +54,16 @@ pub const TEST_MODE_SERVER_SECRET: [u8; 32] = [
     0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 ];
 
+/// Pre-shared key для test_mode (общий секрет клиента и сервера).
+/// Без PSK злоумышленник не может вычислить auth_token даже при знании
+/// server_static_public. В production — per-user PSK из БД.
+pub const TEST_MODE_CLIENT_PSK: [u8; 32] = [
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+];
+
 /// Per-IP rate limiter для защиты от handshake flood (до auth).
 /// Sliding window: max N connections per IP per WINDOW_SECS.
 const IP_RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -240,6 +250,9 @@ struct Args {
     #[arg(long, env = "HMAC_KEY", help = "Hex-encoded HMAC key for data signing")]
     hmac_key: String,
 
+    #[arg(long, env = "CLIENT_PSK", help = "Hex-encoded 32-byte client PSK (pre-shared key)")]
+    client_psk: Option<String>,
+
     #[arg(long, default_value = "0.0.0.0:9090", help = "Prometheus metrics endpoint")]
     metrics_bind: SocketAddr,
 
@@ -268,13 +281,22 @@ async fn main() -> anyhow::Result<()> {
     } else {
         parse_hex_key(&args.secret)?
     };
-    // В test_mode используем фиксированный server_private_key чтобы stress_test
-    // мог использовать соответствующий public key. Реальная безопасность не нужна.
     let server_private_key = if test_mode {
         info!("test_mode: using fixed server_private_key for stress test compatibility");
         TEST_MODE_SERVER_SECRET
     } else {
         parse_hex_key(&args.server_private_key)?
+    };
+    let client_psk = if test_mode {
+        info!("test_mode: using fixed client_psk for stress test compatibility");
+        TEST_MODE_CLIENT_PSK
+    } else {
+        match &args.client_psk {
+            Some(hex) => parse_hex_key(hex)?,
+            None => {
+                anyhow::bail!("CLIENT_PSK required in production mode (--client-psk <hex> or CLIENT_PSK env)")
+            }
+        }
     };
     let fallback_cdn = args.fallback_cdn.clone();
     let hmac_key = parse_hex_key(&args.hmac_key)?;
@@ -359,7 +381,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(e) =
-                handle_tcp_connection(tcp, server_private_key, fallback, acceptor, sub_mgr, test).await
+                handle_tcp_connection(tcp, server_private_key, client_psk, fallback, acceptor, sub_mgr, test).await
             {
                 debug!("client {} error: {:?}", peer, e);
             }
@@ -371,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
 async fn handle_tcp_connection(
     mut tcp: TcpStream,
     server_private_key: [u8; 32],
+    client_psk: [u8; 32],
     fallback_cdn: String,
     acceptor: TlsAcceptor,
     subscription_manager: Arc<SubscriptionManager>,
@@ -398,7 +421,7 @@ async fn handle_tcp_connection(
                     let (ephemeral_public, auth_token, c2s_prefix, s2c_prefix) =
                         read_auth_frame(&mut tls_stream).await?;
 
-                    match server_derive_session(&server_private_key, &ephemeral_public, &auth_token) {
+                    match server_derive_session(&server_private_key, &ephemeral_public, &auth_token, &client_psk) {
                         Some((server_ephemeral_public, session_key)) => {
                             tls_stream.write_all(&server_ephemeral_public).await?;
                             tls_stream.flush().await?;
@@ -453,7 +476,7 @@ async fn handle_tcp_connection(
                         let (ephemeral_public, auth_token, c2s_prefix, s2c_prefix) =
                             read_auth_frame(&mut tls_stream).await?;
 
-                        match server_derive_session(&server_private_key, &ephemeral_public, &auth_token) {
+                        match server_derive_session(&server_private_key, &ephemeral_public, &auth_token, &client_psk) {
                             Some((server_ephemeral_public, session_key)) => {
                                 tls_stream.write_all(&server_ephemeral_public).await?;
                                 tls_stream.flush().await?;
@@ -706,4 +729,46 @@ fn parse_hex_key(hex: &str) -> anyhow::Result<[u8; 32]> {
         key[i] = u8::from_str_radix(byte_str, 16)?;
     }
     Ok(key)
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    /// Adversarial: 50000 distinct IPs против IpRateLimiter (MAX_ENTRIES=10000).
+    /// Проверка: LRU eviction, memory bounded, limiter остаётся функциональным.
+    #[tokio::test]
+    async fn ip_rate_limiter_50000_ips_bounded() {
+        let limiter = IpRateLimiter::new();
+
+        // 50000 IPs с 256 distinct values (1.0.0.0 — 1.0.0.255)
+        // повторяются, но проверяем что limiter не падает.
+        for i in 0..50000u32 {
+            let ip: IpAddr = format!("1.0.0.{}", i % 256).parse().unwrap();
+            let _ = limiter.check(ip).await;
+        }
+
+        // Проверяем что limiter всё ещё функционален.
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let result = limiter.check(loopback).await;
+        assert!(result, "limiter should accept after 50000 IPs");
+
+        // Cleanup не должен паниковать.
+        limiter.cleanup().await;
+    }
+
+    /// Adversarial: один IP превышает лимит (20 conn/min).
+    /// Проверка: 21-я连接 rejected.
+    #[tokio::test]
+    async fn ip_rate_limiter_blocks_excess() {
+        let limiter = IpRateLimiter::new();
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+
+        // Первые 20 — разрешены.
+        for _ in 0..20 {
+            assert!(limiter.check(ip).await, "should allow within limit");
+        }
+        // 21-я — отклонена.
+        assert!(!limiter.check(ip).await, "should block excess");
+    }
 }

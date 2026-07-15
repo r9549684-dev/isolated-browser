@@ -1,5 +1,10 @@
 /// X25519 аутентификация для steal-TLS handshake.
 ///
+/// ВНИМАНИЕ: derive_shared_key, verify_auth_token, generate_auth_token — УСТАРЕЛИ.
+/// Актуальная логика аутентификации (с PSK) находится в steal.rs:
+///   server_derive_session() и client_handshake().
+/// AuthKeyPair (generate/from_bytes) сохраняется для генерации ключей в тестах.
+///
 /// Архитектура:
 /// 1. Клиент генерирует ephemeral X25519 keypair
 /// 2. Клиент отправляет public key в TLS extension (custom extension ID)
@@ -36,18 +41,20 @@ impl AuthKeyPair {
         Self { secret, public }
     }
 
+    /// УСТАРЕЛО. Используйте steal::server_derive_session() с PSK.
+    #[deprecated(since = "P3.1", note = "Use steal::server_derive_session() with PSK parameter")]
     pub fn derive_shared_key(&self, peer_public: &PublicKey) -> [u8; 32] {
         let shared_secret = self.secret.diffie_hellman(peer_public);
-        
         let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
         let mut derived_key = [0u8; 32];
         hkdf.expand(b"isolated-browser-auth", &mut derived_key)
             .expect("HKDF expand failed");
-        
         derived_key
     }
 }
 
+/// УСТАРЕЛО. Используйте steal::server_derive_session() с PSK.
+#[deprecated(since = "P3.1", note = "Use steal::server_derive_session() with PSK parameter")]
 pub fn verify_auth_token(
     client_public: &[u8; 32],
     server_secret: &[u8; 32],
@@ -56,10 +63,11 @@ pub fn verify_auth_token(
     let server_keypair = AuthKeyPair::from_bytes(server_secret);
     let client_public_key = PublicKey::from(*client_public);
     let derived = server_keypair.derive_shared_key(&client_public_key);
-    
     derived == *expected_token
 }
 
+/// УСТАРЕЛО. Используйте steal::client_handshake() с client_psk параметром.
+#[deprecated(since = "P3.1", note = "Use steal::client_handshake() with client_psk parameter")]
 pub fn generate_auth_token(
     client_secret: &[u8; 32],
     server_public: &[u8; 32],
@@ -70,6 +78,7 @@ pub fn generate_auth_token(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

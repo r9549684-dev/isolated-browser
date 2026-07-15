@@ -11,7 +11,57 @@ import mozilla.components.browser.engine.gecko.GeckoEngine
 import mozilla.components.concept.engine.DefaultSettings
 import mozilla.components.concept.engine.EngineSession
 import mozilla.components.concept.engine.EngineView
-import mozilla.components.concept.engine.request.RequestInterceptor
+import java.io.File
+
+/**
+ * Singleton для GeckoRuntime — может быть только один на приложение.
+ * Принимает параметры SOCKS5 прокси и пишет их в prefs.js.
+ */
+object GeckoRuntimeHolder {
+    @Volatile
+    private var runtime: org.mozilla.geckoview.GeckoRuntime? = null
+
+    fun getRuntime(
+        context: Context,
+        proxyHost: String = "127.0.0.1",
+        proxyPort: Int = 18080,
+    ): org.mozilla.geckoview.GeckoRuntime {
+        return runtime ?: synchronized(this) {
+            runtime ?: createRuntime(context, proxyHost, proxyPort).also { runtime = it }
+        }
+    }
+
+    private fun createRuntime(
+        context: Context,
+        proxyHost: String,
+        proxyPort: Int,
+    ): org.mozilla.geckoview.GeckoRuntime {
+        // Создаём prefs.js с настройками SOCKS5 прокси
+        val prefsDir = File(context.filesDir, "gecko_profile")
+        prefsDir.mkdirs()
+        val prefsFile = File(prefsDir, "prefs.js")
+        prefsFile.writeText(
+            """
+            user_pref("network.proxy.type", 1);
+            user_pref("network.proxy.socks", "$proxyHost");
+            user_pref("network.proxy.socks_port", $proxyPort);
+            user_pref("network.proxy.socks_version", 5);
+            user_pref("network.proxy.socks_remote_dns", true);
+            user_pref("network.dns.block-potential-tracker-uri", false);
+            """.trimIndent()
+        )
+
+        val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
+            .configFilePath(prefsFile.absolutePath)
+            .aboutConfigEnabled(true)
+            .build()
+
+        return org.mozilla.geckoview.GeckoRuntime.create(
+            context.applicationContext,
+            runtimeSettings,
+        )
+    }
+}
 
 /**
  * Фабрика PlatformView — регистрирует GeckoViewWrapper как нативный View.
@@ -34,8 +84,9 @@ class GeckoViewPlugin(
 /**
  * Обёртка вокруг GeckoEngine/EngineView (Mozilla Android Components).
  *
- * Конфигурация прокси: GeckoEngine принимает proxyConfig через DefaultSettings.
- * Весь трафик GeckoView идёт через SOCKS5 127.0.0.1:proxyPort — наш транспортный туннель.
+ * Конфигурация прокси: GeckoRuntime создаётся с configFilePath,
+ * указывающим на prefs.js с network.proxy.socks = 127.0.0.1:proxyPort.
+ * Весь трафик GeckoView идёт через SOCKS5 — наш транспортный туннель.
  */
 class GeckoViewWrapper(
     private val context: Context,
@@ -48,13 +99,10 @@ class GeckoViewWrapper(
 
     private val channel = MethodChannel(messenger, "com.isolatedbrowser/browser_$viewId")
 
-    // GeckoEngine — Mozilla Android Components поверх GeckoView
     private val engine: GeckoEngine by lazy {
         val settings = DefaultSettings(
             remoteDebuggingEnabled = false,
             testingModeEnabled     = false,
-            // Настройка SOCKS5 прокси через GeckoRuntime preferences
-            // (устанавливается через GeckoRuntimeSettings.Builder)
         )
         GeckoEngine(context, settings, geckoRuntime(proxyHost, proxyPort))
     }
@@ -104,12 +152,6 @@ class GeckoViewWrapper(
         proxyHost: String,
         proxyPort: Int,
     ): org.mozilla.geckoview.GeckoRuntime {
-        val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
-            .build()
-
-        return org.mozilla.geckoview.GeckoRuntime.create(
-            context.applicationContext,
-            runtimeSettings,
-        )
+        return GeckoRuntimeHolder.getRuntime(context, proxyHost, proxyPort)
     }
 }

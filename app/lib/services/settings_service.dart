@@ -7,6 +7,7 @@ class SettingsService {
   static const _keySocksPort   = 'socks_port';
   static const _keySniList = 'sni_list';
   static const _keyServerPublic = 'server_public';
+  static const _keyClientPsk = 'client_psk';
 
   String gatewayHost   = '';
   int    gatewayPort   = 443;
@@ -14,6 +15,7 @@ class SettingsService {
   int    socksPort     = 18080;
   String sniList       = 'cloudflare.com,google.com';  // comma-separated SNI pool
   String serverPublic  = '';   // hex-encoded 32 bytes X25519 public key
+  String clientPsk     = 'ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789';   // test mode PSK
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -23,6 +25,7 @@ class SettingsService {
     socksPort    = prefs.getInt(_keySocksPort)       ?? 18080;
     sniList      = prefs.getString(_keySniList)      ?? 'cloudflare.com,google.com';
     serverPublic = prefs.getString(_keyServerPublic) ?? '';
+    clientPsk    = prefs.getString(_keyClientPsk)    ?? 'ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789';
   }
 
   Future<void> save() async {
@@ -33,6 +36,7 @@ class SettingsService {
     await prefs.setInt   (_keySocksPort,    socksPort);
     await prefs.setString(_keySniList,      sniList);
     await prefs.setString(_keyServerPublic, serverPublic);
+    await prefs.setString(_keyClientPsk,    clientPsk);
   }
 
   bool get isConfigured =>

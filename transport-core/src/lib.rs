@@ -25,11 +25,12 @@ use std::os::raw::{c_char, c_int, c_ushort};
 ///   key_bytes      — указатель на 32-байтовый ключ шифрования
 ///   sni_list       — C-строка с SNI-доменами через запятую (например "cloudflare.com,google.com")
 ///   server_pub     — указатель на 32-байтовый X25519 public key сервера
+///   psk_bytes      — указатель на 32-байтовый pre-shared key клиента
 ///   rate_limit_bps — ограничение скорости в байтах/сек (0 = без ограничений)
 ///
 /// # Safety
 /// gateway_host и sni_list должны быть валидными C-string.
-/// key_bytes и server_pub должны указывать на буфер >= 32 байт.
+/// key_bytes, server_pub и psk_bytes должны указывать на буфер >= 32 байт.
 #[no_mangle]
 pub unsafe extern "C" fn transport_start(
     socks_port: c_ushort,
@@ -38,9 +39,10 @@ pub unsafe extern "C" fn transport_start(
     key_bytes: *const u8,
     sni_list: *const c_char,
     server_pub: *const u8,
+    psk_bytes: *const u8,
     rate_limit_bps: u64,
 ) -> c_int {
-    if gateway_host.is_null() || key_bytes.is_null() || sni_list.is_null() || server_pub.is_null() {
+    if gateway_host.is_null() || key_bytes.is_null() || sni_list.is_null() || server_pub.is_null() || psk_bytes.is_null() {
         return -1;
     }
 
@@ -70,6 +72,9 @@ pub unsafe extern "C" fn transport_start(
     let mut server_public = [0u8; 32];
     std::ptr::copy_nonoverlapping(server_pub, server_public.as_mut_ptr(), 32);
 
+    let mut client_psk = [0u8; 32];
+    std::ptr::copy_nonoverlapping(psk_bytes, client_psk.as_mut_ptr(), 32);
+
     let bind: SocketAddr = match format!("127.0.0.1:{}", socks_port).parse() {
         Ok(a) => a,
         Err(_) => return -1,
@@ -77,7 +82,7 @@ pub unsafe extern "C" fn transport_start(
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let mut proxy = proxy::Socks5Proxy::new(bind, host, gateway_port, key, sni_pool, server_public);
+        let mut proxy = proxy::Socks5Proxy::new(bind, host, gateway_port, key, sni_pool, server_public, client_psk);
         
         if rate_limit_bps > 0 {
             proxy = proxy.with_rate_limit(rate_limit_bps);

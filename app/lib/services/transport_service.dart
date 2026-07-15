@@ -14,6 +14,7 @@ import 'subscription_service.dart';
 //   const uint8_t* key_bytes,      // 32 bytes
 //   const char* sni_list,           // comma-separated SNI pool
 //   const uint8_t* server_pub,      // 32 bytes X25519 public key
+//   const uint8_t* psk_bytes,       // 32 bytes pre-shared key
 //   uint64_t rate_limit_bps         // bytes per second (0 = no limit)
 // )
 typedef _TransportStartNative = Int32 Function(
@@ -23,6 +24,7 @@ typedef _TransportStartNative = Int32 Function(
   Pointer<Uint8> keyBytes,
   Pointer<Utf8> sniList,
   Pointer<Uint8> serverPub,
+  Pointer<Uint8> pskBytes,
   Uint64 rateLimitBps,
 );
 typedef _TransportStartDart = int Function(
@@ -32,6 +34,7 @@ typedef _TransportStartDart = int Function(
   Pointer<Uint8> keyBytes,
   Pointer<Utf8> sniList,
   Pointer<Uint8> serverPub,
+  Pointer<Uint8> pskBytes,
   int rateLimitBps,
 );
 
@@ -114,6 +117,8 @@ class TransportService extends ChangeNotifier {
       final keyPtr   = malloc.allocate<Uint8>(32);
       final serverPubBytes = _hexToBytes(_settings.serverPublic);
       final serverPubPtr   = malloc.allocate<Uint8>(32);
+      final pskBytes = _hexToBytes(_settings.clientPsk);
+      final pskPtr   = malloc.allocate<Uint8>(32);
       final hostPtr = _settings.gatewayHost.toNativeUtf8();
       final sniPtr  = _settings.sniList.toNativeUtf8();
       
@@ -123,6 +128,9 @@ class TransportService extends ChangeNotifier {
         }
         for (var i = 0; i < 32; i++) {
           serverPubPtr[i] = serverPubBytes[i];
+        }
+        for (var i = 0; i < 32; i++) {
+          pskPtr[i] = pskBytes[i];
         }
 
         // Получаем rate limit из подписки
@@ -136,6 +144,7 @@ class TransportService extends ChangeNotifier {
           keyPtr,
           sniPtr,
           serverPubPtr,
+          pskPtr,
           rateLimitBps,
         );
         debugPrint('[Transport] transport_start returned: $result');
@@ -155,6 +164,7 @@ class TransportService extends ChangeNotifier {
         malloc.free(keyPtr);
         malloc.free(sniPtr);
         malloc.free(serverPubPtr);
+        malloc.free(pskPtr);
       }
     } catch (e) {
       _state = TransportState.error;
