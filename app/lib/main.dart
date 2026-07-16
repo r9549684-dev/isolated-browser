@@ -23,7 +23,7 @@ void main() async {
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => TransportService(settings, subscriptionService)),
-        Provider.value(value: settings),
+        ChangeNotifierProvider.value(value: settings),
         ChangeNotifierProvider.value(value: catalog),
         Provider.value(value: subscriptionService),
       ],
